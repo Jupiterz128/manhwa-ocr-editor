@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 from bubble_cleaner import compose_page
 from text_layout import FONT_POSTSCRIPT,is_current,validate_layer
 
@@ -60,6 +61,11 @@ def _ascii_temp_root(fallback_parent):
 def run_script(script,cancel=None):
     progid=photoshop_progid()
     script=Path(script).resolve()
+    started=script.with_suffix('.started')
+    marker=json.dumps(str(started),ensure_ascii=True)
+    original=script.read_text(encoding='utf-8-sig')
+    script.write_text(f'var _started=new File({marker}); _started.open("w"); _started.close();\n'+original,
+                      encoding='utf-8-sig')
     # JScript uses IDispatch directly, avoiding .NET's dependency on the registered type library.
     bridge=script.with_name('photoshop_bridge.js')
     bridge.write_text("""function whenReady(call) {
@@ -83,10 +89,34 @@ def run_script(script,cancel=None):
     with tempfile.TemporaryFile() as log:
         process=subprocess.Popen([str(host),'//Nologo','//B','//U',str(bridge),progid,str(script)],
             stdout=log,stderr=subprocess.STDOUT,creationflags=subprocess.CREATE_NO_WINDOW)
-        while True:
-            try:code=process.wait(timeout=.2);break
-            except subprocess.TimeoutExpired:
-                if cancel is not None and cancel.is_set():Path(script).with_name('cancel.flag').touch()
+        # Photoshop may display a startup billing dialog while COM is waiting.
+        # Run UI Automation separately so an unresponsive window cannot stall the exporter.
+        helper=None
+        start=time.monotonic()
+        next_check=start+2
+        try:
+            while True:
+                try:code=process.wait(timeout=.2);break
+                except subprocess.TimeoutExpired:
+                    if cancel is not None and cancel.is_set():
+                        script.with_name('cancel.flag').touch()
+                    now=time.monotonic()
+                    if now-start>=60 and not started.exists():
+                        process.kill()
+                        process.wait()
+                        raise RuntimeError('Photoshop ไม่เริ่มสคริปต์ภายใน 60 วินาที กรุณาตรวจหน้าต่างแจ้งเตือนใน Photoshop แล้วลองอีกครั้ง')
+                    if helper and helper.poll()==0:
+                        next_check=float('inf')
+                    if now>=next_check and now-start<45 and (helper is None or helper.poll() is not None):
+                        tool=Path(__file__).with_name('dismiss_photoshop_payment.ps1')
+                        helper=subprocess.Popen(['powershell.exe','-NoProfile','-NonInteractive','-ExecutionPolicy',
+                            'Bypass','-File',str(tool)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+                            creationflags=subprocess.CREATE_NO_WINDOW)
+                        next_check=now+5
+        finally:
+            if helper and helper.poll() is None:
+                helper.kill()
+                helper.wait()
         if code:
             log.seek(0);message=log.read().decode('utf-16-le',errors='replace')
             raise RuntimeError('Photoshop ส่งออกไม่สำเร็จ: '+message[-2000:])
