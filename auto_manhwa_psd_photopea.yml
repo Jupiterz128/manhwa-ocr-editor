@@ -1,0 +1,128 @@
+name: Manhwa OCR to PSD (Photopea Cloud / Runner)
+
+on:
+  workflow_dispatch:
+    inputs:
+      input_mode:
+        description: Input mode
+        type: choice
+        required: true
+        default: image_folder
+        options:
+          - mtp
+          - image_folder
+      drive_link:
+        description: Google Drive folder or file link
+        type: string
+        required: true
+      ocr_lang:
+        description: OCR language
+        type: choice
+        default: ko+en
+        options:
+          - ko+en
+          - en
+          - zh+en
+          - zh_tw+en
+      translation_drive_link:
+        description: Translation Google Drive link (optional)
+        type: string
+        default: ''
+      font_preset_override:
+        description: Font preset override
+        type: choice
+        default: auto
+        options:
+          - auto
+      use_smart_stitch:
+        description: Enable Lossless SmartStitch
+        type: boolean
+        default: false
+      psd_backend:
+        description: PSD export backend
+        type: choice
+        default: photopea
+        options:
+          - photopea
+          - photoshop
+
+permissions: {}
+
+concurrency:
+  group: manhwa-ocr-psd-pipeline
+  cancel-in-progress: false
+
+jobs:
+  convert:
+    if: github.ref == 'refs/heads/main'
+    # Option A (100% on GitHub Cloud - no local PC / no Photoshop):
+    runs-on: windows-latest
+    # Option B (Use your RTX 4060 PC for fast AI, but Photopea for PSD so Photoshop never opens):
+    # runs-on: [self-hosted, Windows, X64, manhwa-rtx4060]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies and Playwright Chromium
+        shell: powershell
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements_rapid.txt -r requirements_text_psd.txt -r requirements_gdrive.txt
+          pip install playwright
+          playwright install chromium
+
+      - name: Prepare AI models
+        shell: powershell
+        run: |
+          python prepare_rapid_models.py
+          python prepare_manga109.py
+          python prepare_lama.py
+
+      - name: Restore Google Drive credentials from GitHub Secrets
+        shell: powershell
+        env:
+          GDRIVE_CLIENT_SECRET_JSON: ${{ secrets.GDRIVE_CLIENT_SECRET_JSON }}
+          GDRIVE_TOKEN_JSON: ${{ secrets.GDRIVE_TOKEN_JSON }}
+        run: |
+          if ($env:GDRIVE_CLIENT_SECRET_JSON) {
+            Set-Content -Path "credentials.json" -Value $env:GDRIVE_CLIENT_SECRET_JSON -Encoding utf8
+          }
+          if ($env:GDRIVE_TOKEN_JSON) {
+            Set-Content -Path "token.json" -Value $env:GDRIVE_TOKEN_JSON -Encoding utf8
+          }
+
+      - name: Run CLI pipeline with Photopea PSD export
+        shell: powershell
+        env:
+          MODE: ${{ inputs.input_mode }}
+          SOURCE: ${{ inputs.drive_link }}
+          TRANSLATION: ${{ inputs.translation_drive_link }}
+          PRESET: ${{ inputs.font_preset_override }}
+          OCR_LANG: ${{ inputs.ocr_lang }}
+          STITCH: ${{ inputs.use_smart_stitch }}
+          PSD_BACKEND: ${{ inputs.psd_backend }}
+        run: |
+          [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+          $env:PYTHONIOENCODING = 'utf-8'
+          $env:PYTHONUTF8 = '1'
+
+          $params = @(
+            '-X', 'utf8', 'cli_pipeline.py',
+            '--input-mode', $env:MODE,
+            '--drive-link', $env:SOURCE,
+            '--lang', $env:OCR_LANG,
+            '--smart-stitch', $env:STITCH,
+            '--psd-backend', $env:PSD_BACKEND
+          )
+          if ($env:PRESET -ne 'auto') { $params += @('--preset', $env:PRESET) }
+          if ($env:TRANSLATION) { $params += @('--translation-link', $env:TRANSLATION) }
+
+          python @params
+          exit $LASTEXITCODE
