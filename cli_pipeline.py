@@ -24,17 +24,30 @@ def boolean(value):
 
 def options():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--input', type=Path, required=True)
+    inputs=p.add_mutually_exclusive_group(required=True)
+    inputs.add_argument('--input',type=Path)
+    inputs.add_argument('--drive-link')
+    p.add_argument('--input-mode',choices=['mtp','image_folder'])
+    p.add_argument('--translation-link')
     p.add_argument('--translation', type=Path)
     p.add_argument('--output-dir', type=Path)
     p.add_argument('--lang', choices=['ko+en','en','zh+en','zh_tw+en'], default='ko+en')
-    p.add_argument('--preset', choices=list(load_font_presets()), default='1. มังฮวาเกาหลี')
+    p.add_argument('--preset', choices=list(load_font_presets()), default=None)
     p.add_argument('--smart-stitch', type=boolean, default=False)
     p.add_argument('--stitch-height', type=int, default=15000)
     p.add_argument('--stitch-width', type=int, default=720)
     p.add_argument('--skip-clean', type=boolean, default=False)
     p.add_argument('--export-format', choices=['psd','mtp','png','all'], default='psd')
-    return p.parse_args()
+    args=p.parse_args()
+    if bool(args.drive_link)!=bool(args.input_mode):
+        p.error('--drive-link and --input-mode must be used together')
+    if args.translation_link and args.input_mode!='image_folder':
+        p.error('--translation-link requires image_folder')
+    if args.drive_link and (args.translation or args.output_dir):
+        p.error('Use --translation-link and the configured Drive output folders for Drive jobs')
+    if not args.preset:
+        args.preset='2. การ์ตูนต่อสู้' if args.input_mode=='mtp' else '1. มังฮวาเกาหลี'
+    return args
 
 
 def emit(event):
@@ -42,7 +55,7 @@ def emit(event):
     print(f'{value:.0f}%' if kind=='progress' else value, flush=True)
 
 
-def checkpoint(path, pages, drafts, preset):
+def checkpoint(path, pages, drafts, preset, **metadata):
     records = []
     for page in pages:
         record = asdict(page)
@@ -53,10 +66,39 @@ def checkpoint(path, pages, drafts, preset):
         record['clean_drafts'] = {b.id:encode_region(drafts[(page.id,b.id)]) for b in page.bubbles
                                   if (page.id,b.id) in drafts}
         records.append(record)
-    app.atomic_json(path, dict(format='manhwa-ocr-project', version=5, font_preset=preset, pages=records))
+    app.atomic_json(path, dict(format='manhwa-ocr-project', version=5, font_preset=preset, pages=records, **metadata))
 
 
 def run(args):
+    drive_first=args.input_mode=='image_folder' and not args.translation_link
+    if args.drive_link:
+        import gdrive_sync as drive
+        from tempfile import mkdtemp
+        source_id=drive.drive_id(args.drive_link)
+        jobs=drive.ROOT/'runner_jobs'
+        jobs.mkdir(parents=True,exist_ok=True)
+        job=Path(mkdtemp(prefix=source_id+'-',dir=jobs))
+        cache=drive.ROOT/'runner_cache'/source_id
+        args.output_dir=job/'output'
+        args.export_format='psd'
+        if args.input_mode=='mtp':
+            args.input,name=drive.download_drive_file(source_id,job/'input')
+            if args.input.suffix.lower()!='.mtp':raise ValueError('Expected .mtp input')
+            episode=Path(name).stem
+            args.smart_stitch=args.skip_clean=True
+            args.stitch_height,args.stitch_width=15000,720
+        elif drive_first:
+            args.input=job/'images'
+            episode,_=drive.download_drive_folder_images(source_id,args.input)
+            args.smart_stitch=args.skip_clean=False
+        else:
+            args.input=cache/'project_cleaned.json'
+            if not args.input.is_file() or (cache/'pending').exists():
+                raise ValueError('No completed clean cache for this Drive folder; finish the initial image_folder job first')
+            episode=json.loads(args.input.read_text('utf-8'))['drive_folder_name']
+            args.translation,_=drive.download_drive_file(args.translation_link,job/'translation')
+            if args.translation.suffix.lower()!='.txt':raise ValueError('Expected .txt translation')
+            args.skip_clean=True
     source = args.input.resolve(strict=True)
     if not 800 <= args.stitch_height <= 29400 or not 200 <= args.stitch_width <= 6000:
         raise ValueError('Stitch height must be 800..29400 and width 200..6000')
@@ -70,7 +112,11 @@ def run(args):
     print(f'Output: {output}', flush=True)
     pages, drafts = [], {}
     stats = dict(verified=0, review=0, existing=0, failures=[])
-    gpu = app._auto_gpu_default()
+    try:
+        import torch
+        gpu = torch.cuda.is_available()
+    except ImportError:
+        gpu = False
     print(f'0% CUDA (PyTorch): {gpu}', flush=True)
     cancel = threading.Event()
     pipeline = None
@@ -78,7 +124,7 @@ def run(args):
     def reader(for_detection=False):
         nonlocal pipeline
         if pipeline is None:
-            pipeline = app.LocalPipeline(app.OCRCache(), mode='auto', lang=args.lang, gpu=gpu,
+            pipeline = app.LocalPipeline(app.OCRCache(), mode='rapid' if drive_first else 'auto', lang=args.lang, gpu=gpu,
                                          neural=for_detection, type_scan=for_detection, prefer_rapid=True, log=print)
         return pipeline
 
@@ -102,9 +148,20 @@ def run(args):
             else:
                 raise ValueError('Unsupported project format')
         if not pages:raise ValueError('No pages in input')
-        if args.smart_stitch:
-            pages,drafts,_ = app.stitch_pages(pages,drafts,args.stitch_height,'User Customized Width',
-                args.stitch_width,'Smart Pixel Comparison',90,5,0,output/'stitched_pages',cancel,emit,strict=True)
+        if drive_first:
+            from text_layout import export_source_script
+            cache.mkdir(parents=True,exist_ok=True)
+            (cache/'pending').write_text(job.name,encoding='utf-8')
+            text_folder=drive.create_job_subfolder(drive.TEXT_EXPORT_FOLDER_ID,episode)
+            for mode,suffix in [('id_template','_ocr.txt'),('numbered','_ocr_numbered.txt')]:
+                script=job/(drive.local_name(episode)+suffix)
+                script.write_text(export_source_script(pages,mode),encoding='utf-8')
+                drive.upload_file_to_folder(script,text_folder)
+            print('ส่งต้นฉบับพร้อมแปลแล้ว กำลังสร้าง Mask และ Clean ต่อ',flush=True)
+            for page in pages:
+                raw=app.load_image(page.path)
+                for b in page.bubbles:
+                    drafts[(page.id,b.id)]=prepare_region(raw,b)
         if args.translation:
             changes,report = detect_and_parse_translations(args.translation.read_text('utf-8-sig'),pages)
             print(f"Translations: {report['matched_count']}/{report['total_bubbles']}", *report['warnings'],flush=True)
@@ -115,6 +172,9 @@ def run(args):
                     if b.id in report['frame_tags']:
                         b.frame_type=report['frame_tags'][b.id]
                         b.frame_type_locked=True
+        if args.smart_stitch:
+            pages,drafts,_ = app.stitch_pages(pages,drafts,args.stitch_height,'User Customized Width',
+                args.stitch_width,'Smart Pixel Comparison',90,5,0,output/'stitched_pages',cancel,emit,strict=True)
         fonts = load_font_presets()[args.preset]
         cleaner = Cleaner()
         for i,page in enumerate(pages,1):
@@ -150,7 +210,7 @@ def run(args):
                         stats['failures'].append(dict(page=i,bubble=b.id,error=str(exc)))
                         print(f'CLEAN failed: {i}/{b.id}: {exc}',flush=True)
                 if b.translation.strip():
-                    b.frame_type=classify_bubble_type(raw,b)
+                    b.frame_type=classify_bubble_type(raw,b,gpu=gpu)
                     b.font_choice=fonts[b.frame_type]
                     try:resolve_font(b.font_choice)
                     except RuntimeError:
@@ -162,6 +222,9 @@ def run(args):
                     b.text_layer=layout_text(work,b)
             print(f'CLEAN / layout {100*i/len(pages):.0f}%',flush=True)
         checkpoint(output/'project.json',pages,drafts,args.preset)
+        if drive_first and not stats['failures']:
+            checkpoint(cache/'project_cleaned.json',pages,drafts,args.preset,drive_folder_name=episode)
+            (cache/'pending').unlink()
         for i,page in enumerate(pages,1):
             image=app.load_image(page.path)
             if args.export_format in ('png','all'):
@@ -170,6 +233,10 @@ def run(args):
                 report=export_psd(image,page,output/f'{i:02}.psd')
                 for warning in report.get('warnings',[]):print(warning,flush=True)
             print(f'Export pages {100*i/len(pages):.0f}%',flush=True)
+        if args.drive_link and not stats['failures']:
+            dest=drive.create_job_subfolder(drive.PSD_OUTPUT_FOLDER_ID,episode)
+            for i in range(1,len(pages)+1):
+                drive.upload_file_to_folder(output/f'{i:02}.psd',dest)
         if args.export_format in ('mtp','all'):
             app.write_mtp(output/'project.mtp',pages,fonts,cancel,emit)
     finally:

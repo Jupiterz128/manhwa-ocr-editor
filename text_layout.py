@@ -236,13 +236,14 @@ class BubbleTypeDetector:
         self.detections=[]
         self.last_error=None
 
-    def scan(self,image):
+    def scan(self,image,gpu=False):
         with self.lock:
-            if image is not self.page:
+            if image is not self.page or gpu!=getattr(self,'page_gpu',False):
                 try:
                     folder=presets_config_path().parent/'seg_models'/'bubble_type_v11'
                     model=_load_type_model(folder,(folder/'weights.onnx').stat().st_mtime_ns,
-                                           (folder/'class_names.txt').stat().st_mtime_ns)
+                                           (folder/'class_names.txt').stat().st_mtime_ns,gpu)
+                    self.page_gpu=gpu
                     self.detections=self._infer(image,*model)
                     self.last_error=None
                 except Exception as exc:
@@ -289,13 +290,13 @@ class BubbleTypeDetector:
         keep=cv2.dnn.NMSBoxes(boxes,scores,0.,.50)
         return [(boxes[i],scores[i],types[i]) for i in np.asarray(keep,dtype=int).ravel()]
 
-    def match(self,image,box):
+    def match(self,image,box,gpu=False):
         x0,y0,x1,y1=box
         area=max(1,(x1-x0)*(y1-y0))
         cx,cy=(x0+x1)/2,(y0+y1)/2
         best=0
         result=None
-        for (x,y,w,h),confidence,category in self.scan(image):
+        for (x,y,w,h),confidence,category in self.scan(image,gpu):
             overlap=max(0,min(x1,x+w)-max(x0,x))*max(0,min(y1,y+h)-max(y0,y))
             coverage=overlap/area
             iou=overlap/max(1,w*h+area-overlap)
@@ -310,7 +311,7 @@ class BubbleTypeDetector:
 _BUBBLE_TYPE_DETECTOR=BubbleTypeDetector()
 
 
-def classify_bubble_type(image,bubble):
+def classify_bubble_type(image,bubble,gpu=False):
     tag,clean=extract_frame_tag(bubble.translation or '')
     if tag:
         bubble.translation=clean
@@ -321,7 +322,7 @@ def classify_bubble_type(image,bubble):
         return bubble.frame_type
     if getattr(bubble,'detected_frame_type','') in FRAME_TYPE_LABELS:
         return bubble.detected_frame_type
-    prediction=_BUBBLE_TYPE_DETECTOR.match(image,bubble.box)
+    prediction=_BUBBLE_TYPE_DETECTOR.match(image,bubble.box,gpu)
     if prediction:return prediction
     speech=getattr(bubble,'detector_class',-1)==0
     texts=[(value or '').strip() for value in (bubble.text,bubble.translation)]

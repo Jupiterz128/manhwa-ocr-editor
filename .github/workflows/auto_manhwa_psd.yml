@@ -2,34 +2,31 @@ name: Manhwa OCR to Photoshop
 on:
   workflow_dispatch:
     inputs:
-      input_path:
-        description: 'โฟลเดอร์ภาพ หรือไฟล์ .mtp / .json บนเครื่อง Runner'
+      input_mode:
+        description: 'ประเภทต้นทางใน Google Drive'
         required: true
+        type: choice
+        options: [mtp, image_folder]
+      drive_link:
+        description: 'ลิงก์ไฟล์ MTP หรือโฟลเดอร์ภาพ'
         type: string
-      translation_path:
-        description: 'ไฟล์คำแปล TXT (เว้นว่างได้)'
-        type: string
-      output_dir:
-        description: 'โฟลเดอร์ผลลัพธ์ (เว้นว่างเพื่อบันทึกข้างต้นทาง)'
-        type: string
+        required: true
       ocr_lang:
-        description: 'ภาษา OCR'
+        description: 'ภาษา OCR ของโฟลเดอร์ภาพ'
         type: choice
+        default: ko+en
         options: [ko+en, en, zh+en, zh_tw+en]
-      font_preset:
-        description: 'โปรไฟล์ฟอนต์'
+      translation_drive_link:
+        description: 'ลิงก์ไฟล์ TXT ที่แปลแล้ว (รอบแรกเว้นว่าง)'
+        type: string
+        default: ''
+      font_preset_override:
+        description: 'โปรไฟล์ฟอนต์ (auto เลือกการ์ตูนต่อสู้สำหรับ MTP)'
         type: choice
-        options: ['1. มังฮวาเกาหลี', '2. การ์ตูนต่อสู้']
+        default: auto
+        options: [auto, '1. มังฮวาเกาหลี', '2. การ์ตูนต่อสู้']
       use_smart_stitch:
-        description: 'SmartStitch 720 × 15000'
-        type: boolean
-        default: false
-      export_format:
-        description: 'รูปแบบส่งออก'
-        type: choice
-        options: [psd, mtp, png, all]
-      skip_clean:
-        description: 'ข้าม CLEAN สำหรับภาพที่คลีนแล้ว'
+        description: 'รวมและตัดหน้าเมื่อรับคำแปลกลับ (MTP เปิดอัตโนมัติ)'
         type: boolean
         default: false
 
@@ -46,14 +43,12 @@ jobs:
       - name: Run local pipeline
         shell: powershell
         env:
-          SOURCE: ${{ inputs.input_path }}
-          TRANSLATION: ${{ inputs.translation_path }}
-          DESTINATION: ${{ inputs.output_dir }}
+          MODE: ${{ inputs.input_mode }}
+          SOURCE: ${{ inputs.drive_link }}
+          TRANSLATION: ${{ inputs.translation_drive_link }}
+          PRESET: ${{ inputs.font_preset_override }}
           OCR_LANG: ${{ inputs.ocr_lang }}
-          PRESET: ${{ inputs.font_preset }}
           STITCH: ${{ inputs.use_smart_stitch }}
-          FORMAT: ${{ inputs.export_format }}
-          SKIP_CLEAN: ${{ inputs.skip_clean }}
         run: |
           [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
           $env:PYTHONIOENCODING = 'utf-8'
@@ -61,9 +56,9 @@ jobs:
           $root = $env:MANHWA_APP_HOME
           if (!$root) { $root = 'D:\ManhwaOCR' }
           Set-Location -LiteralPath $root
-          $params = @('-X','utf8','cli_pipeline.py','--input',$env:SOURCE,'--lang',$env:OCR_LANG,'--preset',$env:PRESET,'--smart-stitch',$env:STITCH,'--skip-clean',$env:SKIP_CLEAN,'--export-format',$env:FORMAT)
-          if ($env:TRANSLATION) { $params += @('--translation',$env:TRANSLATION) }
-          if ($env:DESTINATION) { $params += @('--output-dir',$env:DESTINATION) }
+          $params = @('-X','utf8','cli_pipeline.py','--input-mode',$env:MODE,'--drive-link',$env:SOURCE,'--lang',$env:OCR_LANG,'--smart-stitch',$env:STITCH)
+          if ($env:PRESET -ne 'auto') { $params += @('--preset',$env:PRESET) }
+          if ($env:TRANSLATION) { $params += @('--translation-link',$env:TRANSLATION) }
           & (Join-Path $root '.venv\Scripts\python.exe') @params
           exit $LASTEXITCODE
 

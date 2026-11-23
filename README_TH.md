@@ -588,6 +588,6 @@ python -m unittest discover -s tests -v
 
 ### สั่งทำงานจาก GitHub Actions
 
-เปิด Actions → Manhwa OCR to Photoshop → Run workflow บนกิ่ง main แล้วกรอกพาธที่บัญชี Windows ของ Runner เปิดได้ งานใช้โค้ดใน MANHWA_APP_HOME และบันทึกผลบนเครื่อง หากโฟลเดอร์ปลายทางมีไฟล์อยู่ โปรแกรมจะสร้างโฟลเดอร์ run- ย่อยเพื่อเก็บผลรอบใหม่ ใช้ project.json เปิดแก้ต่อและตรวจ clean_report.json สำหรับกรอบที่ต้องตรวจหรือคลีนล้มเหลว
+เปิด Actions → Manhwa OCR to Photoshop → Run workflow บนกิ่ง main เลือกประเภทงานแล้ววางลิงก์ Google Drive ผลลัพธ์จะถูกส่งกลับเข้าโฟลเดอร์ Drive ของงาน ดูขั้นตอนเชื่อมบัญชีและการส่งคำแปลกลับใน [คู่มือ Google Drive](GDRIVE_SETUP_TH.md) ส่วน CLI ยังรองรับพาธในเครื่องด้วย --input เช่นเดิม
 
 หลังเข้าสู่ระบบ Windows ให้เปิด START_GITHUB_RUNNER.bat และคงเซสชันเดสก์ท็อปไว้สำหรับ Photoshop หากเปลี่ยนเครื่อง ให้รัน SETUP_GITHUB_RUNNER.ps1 ด้วยบัญชี Windows ที่ใช้ Photoshop และ gh ที่มีสิทธิ์จัดการ Runner ของคลัง หรือไปที่ Settings → Actions → Runners → New self-hosted runner → Windows x64 ใช้คำสั่งและ token ชั่วคราวจากหน้านั้นใน D:\GitHubRunner เพิ่ม label manhwa-rtx4060 และตอบ No เมื่อถาม Run as service จากนั้นเปิดไฟล์ .bat ข้างต้น ซิงก์โค้ดในเครื่องก่อนใช้ workflow รุ่นใหม่

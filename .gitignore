@@ -40,3 +40,6 @@ pull_onnx.py
 *.log
 !assets/**/*.png
 !assets/**/*.jpg
+client_secret*.json
+gdrive_token*.json
+gdrive_token*.tmp
