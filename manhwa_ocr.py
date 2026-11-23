@@ -1364,6 +1364,575 @@ class GoogleVisionOCR:
         return result
 
 
+def read_mtp(mtp_file, cancel, emit, extract_dir=None):
+    from text_layout import fast_direct_layer,normalize_font_choice,resolve_font
+    emit(('log',f'กำลังอ่านไฟล์ .mtp: {mtp_file.name}…'))
+    data=json.loads(mtp_file.read_text(encoding='utf-8-sig'))
+    files_list=data.get('files')
+    if not isinstance(files_list,list) or not files_list:
+        raise ValueError('ไม่พบรายการรูปภาพ (files) ในไฟล์ .mtp นี้')
+
+    safe_stem=re.sub(r'[<>:"/\\|?*]+','_',mtp_file.stem).strip() or 'mtp_project'
+    extract_dir=extract_dir or mtp_file.parent/(safe_stem+'_mtp_pages')
+    try:
+        extract_dir.mkdir(parents=True,exist_ok=True)
+    except OSError:
+        h_tag=hashlib.md5(str(mtp_file).encode('utf-8',errors='ignore')).hexdigest()[:10]
+        extract_dir=DATA_DIR/'mtp_pages'/(safe_stem[:40]+'_'+h_tag)
+        extract_dir.mkdir(parents=True,exist_ok=True)
+
+    font_reg=data.get('fontRegistry') if isinstance(data.get('fontRegistry'),dict) else {}
+    ts_all=data.get('tsData') if isinstance(data.get('tsData'),dict) else {}
+    ocr_all=data.get('ocrData') if isinstance(data.get('ocrData'),dict) else {}
+    tl_all=data.get('textLayersData') if isinstance(data.get('textLayersData'),dict) else {}
+
+    def safe_font(raw_name):
+        cand=normalize_font_choice(raw_name)
+        try:
+            resolve_font(cand)
+            return cand
+        except Exception:
+            return DEFAULT_FONT_CHOICE
+
+    pages_out=[]
+    total_bubbles=0;total_patches=0;total_laid=0
+    for idx,f_rec in enumerate(files_list):
+        if cancel.is_set():raise Cancelled()
+        raw_name=str(f_rec.get('name') or f'{idx+1:02d}.jpg')
+        clean_name=Path(raw_name).name
+        if Path(clean_name).suffix.lower() not in IMAGE_EXTS:
+            clean_name+=('.png' if 'png' in str(f_rec.get('type','')).lower() else '.jpg')
+        img_dest=extract_dir/clean_name
+        emit(('log',f'แกะข้อมูล .mtp หน้า {idx+1}/{len(files_list)}: {clean_name}'))
+        img_bytes=_decode_data_url(f_rec.get('dataUrl',''))
+        if not img_dest.is_file() or img_dest.stat().st_size!=len(img_bytes):
+            tmp_img=img_dest.with_name(img_dest.name+'.'+uid()+'.tmp')
+            try:
+                tmp_img.write_bytes(img_bytes)
+                os.replace(tmp_img,img_dest)
+            finally:
+                tmp_img.unlink(missing_ok=True)
+
+        im=load_image(img_dest)
+        W,H=im.size
+        ts_page=_mtp_page_lookup(ts_all,raw_name,idx)
+        ocr_page=_mtp_page_lookup(ocr_all,raw_name,idx)
+        tl_page=_mtp_page_lookup(tl_all,raw_name,idx)
+        tl_by_id={str(t.get('id')):t for t in tl_page if isinstance(t,dict) and t.get('id') is not None}
+        used_tl_ids=set()
+
+        text_entries=[it for it in ts_page if isinstance(it,dict) and it.get('type')=='text' and it.get('visible',True) is not False]
+        if not text_entries:
+            text_entries=[it for it in ocr_page if isinstance(it,dict)]
+
+        page_bubbles=[]
+        layer_hints={}
+        mtp_id_to_bid={}
+        for t_it in text_entries:
+            raw_b=t_it.get('box')
+            q=[]
+            if isinstance(raw_b,list) and len(raw_b)==4 and isinstance(raw_b[0],(list,tuple)):
+                bbox=clip_box(polygon_box(raw_b),W,H)
+                if valid_quad(raw_b) and abs(quad_angle(raw_b))>=1.5:
+                    q=[[float(pt[0]),float(pt[1])] for pt in raw_b]
+            elif isinstance(raw_b,list) and len(raw_b)==4:
+                bbox=clip_box(raw_b,W,H)
+            else:
+                continue
+            if area(bbox)<=16:continue
+
+            tl=tl_by_id.get(str(t_it.get('targetLayerId','')))
+            if tl is not None:
+                used_tl_ids.add(str(tl.get('id')))
+            src_txt=str(t_it.get('originalText') or t_it.get('text') or '').strip()
+            trn_txt=str(t_it.get('translation') or (tl.get('text') if tl else '') or '').strip()
+            ft_raw=str(t_it.get('fontType') or (tl.get('fontType') if tl else '') or 'normal').lower()
+            ftype=MTP_TYPE_TO_FRAME.get(ft_raw,'normal')
+            raw_font=(tl.get('fontFamily') if tl else None) or font_reg.get(ft_raw) or DEFAULT_FONT_CHOICE
+            f_choice=safe_font(raw_font)
+
+            b_obj=Bubble(
+                box=bbox,
+                text=src_txt,
+                translation=trn_txt,
+                lines=[asdict(Line(src_txt or trn_txt,bbox,0.99,'MTP',q))],
+                score=0.99,
+                engine='MTP',
+                reviewed=True,
+                quad=q,
+                font_choice=f_choice,
+                frame_type=ftype,
+            )
+            if tl is not None:
+                pref_sz=int(round(float(tl.get('fontSize') or tl.get('size') or 0)))
+                pref_xy=(float(tl['x']),float(tl['y'])) if ('x' in tl and 'y' in tl) else None
+                raw_rot=float(tl.get('rot') or 0.0)
+                pref_rot=raw_rot if abs(raw_rot)>=0.2 else None
+                layer_hints[b_obj.id]=(pref_sz,pref_xy,pref_rot)
+            page_bubbles.append(b_obj)
+            if t_it.get('id') is not None:
+                mtp_id_to_bid[str(t_it.get('id'))]=b_obj.id
+
+        for tl in tl_page:
+            if not isinstance(tl,dict) or tl.get('visible',True) is False:continue
+            tid=str(tl.get('id',''))
+            if tid in used_tl_ids:continue
+            trn_txt=str(tl.get('text') or '').strip()
+            if not trn_txt:continue
+            cx=float(tl.get('x',W/2.0));cy=float(tl.get('y',H/2.0))
+            bw_l=max(24.0,float(tl.get('boxWidth') or 140.0))
+            bh_l=max(24.0,float(tl.get('boxHeight') or 80.0))
+            bbox=clip_box([cx-bw_l/2.0,cy-bh_l/2.0,cx+bw_l/2.0,cy+bh_l/2.0],W,H)
+            if area(bbox)<=16:continue
+            ft_raw=str(tl.get('fontType') or 'normal').lower()
+            b_obj=Bubble(
+                box=bbox,
+                text='',
+                translation=trn_txt,
+                lines=[],
+                score=0.99,
+                engine='MTP',
+                reviewed=True,
+                font_choice=safe_font(tl.get('fontFamily') or DEFAULT_FONT_CHOICE),
+                frame_type=MTP_TYPE_TO_FRAME.get(ft_raw,'normal'),
+            )
+            pref_sz=int(round(float(tl.get('fontSize') or tl.get('size') or 0)))
+            raw_rot=float(tl.get('rot') or 0.0)
+            pref_rot=raw_rot if abs(raw_rot)>=0.2 else None
+            layer_hints[b_obj.id]=(pref_sz,(cx,cy),pref_rot)
+            page_bubbles.append(b_obj)
+
+        page_bubbles.sort(key=lambda b:(b.box[1],b.box[0]))
+
+        patches_out=[]
+        for p_it in ts_page:
+            if not isinstance(p_it,dict) or p_it.get('type')!='inpaint':continue
+            if p_it.get('inpaintVisible',True) is False or p_it.get('visible',True) is False:continue
+            purl=str(p_it.get('patchUrl') or '')
+            if not purl.startswith('data:image/'):continue
+            try:
+                p_bytes=_decode_data_url(purl)
+                with Image.open(io.BytesIO(p_bytes)) as pim:
+                    p_rgba=pim.convert('RGBA')
+                pw,ph=p_rgba.size
+                pr=p_it.get('patchRect') or [0,0,pw,ph]
+                px0=max(0,min(W-2,int(round(float(pr[0])))))
+                py0=max(0,min(H-2,int(round(float(pr[1])))))
+                cw_p=min(pw,W-px0);ch_p=min(ph,H-py0)
+                if cw_p<2 or ch_p<2:continue
+                if (cw_p,ch_p)!=(pw,ph):
+                    p_rgba=p_rgba.crop((0,0,cw_p,ch_p))
+                pbox=[px0,py0,px0+cw_p,py0+ch_p]
+                alpha_np=np.asarray(p_rgba.getchannel('A'))
+                pmask=((alpha_np>16).astype(np.uint8)*255) if int(alpha_np.min())<250 else np.full((ch_p,cw_p),255,dtype=np.uint8)
+                linked_bid=mtp_id_to_bid.get(str(p_it.get('targetLayerId','')),'')
+                method_p=str(p_it.get('inpaintModel') or 'lama')
+                patch_rec=encode_patch(pbox,p_rgba.convert('RGB'),pmask,method_p,linked_bid)
+                patch_rec['quality']={'passes':1,'remaining':[],'verification_error':'','visual_checked':True,'visual_residual_pixels':0,'needs_review':False}
+                patches_out.append(patch_rec)
+            except Exception as exc:
+                emit(('log',f'ข้ามแผ่นคลีนบางจุดใน {clean_name}: {exc}'))
+
+        work_im=compose_page(im,patches_out) if patches_out else im
+        for b_obj in page_bubbles:
+            if b_obj.translation.strip():
+                pref_sz,pref_xy,pref_rot=layer_hints.get(b_obj.id,(0,None,None))
+                try:
+                    b_obj.text_layer=fast_direct_layer(
+                        work_im,b_obj,b_obj.translation,
+                        font_choice=b_obj.font_choice,
+                        preferred_size=pref_sz,center_xy=pref_xy,preferred_rot=pref_rot,
+                    )
+                    if b_obj.text_layer.get('font_choice'):
+                        b_obj.font_choice=b_obj.text_layer['font_choice']
+                    total_laid+=1
+                except Exception as exc:
+                    emit(('log',f'จัด Text {clean_name}: {exc}'))
+
+        p_obj=Page(str(img_dest.resolve()),page_bubbles,'',True,uid(),patches_out)
+        pages_out.append(p_obj)
+        total_bubbles+=len(page_bubbles);total_patches+=len(patches_out)
+        emit(('progress',(idx+1)/len(files_list)*100))
+
+    suspect_total=sum(1 for pg in pages_out for bb in pg.bubbles if _is_suspect_mismatch(bb))
+    warn_tail=f' • ⚠ พบ {suspect_total} กรอบที่อาจติดเสียง SFX แทรกคิว' if suspect_total else ''
+    summary=(f'เปิดไฟล์ .mtp สำเร็จ: {len(pages_out)} หน้า • กรอบข้อความ {total_bubbles} ช่อง • '
+             f'แผ่นคลีน {total_patches} จุด • วางคำแปลไทย {total_laid} ช่อง{warn_tail}')
+    return pages_out,str(mtp_file),summary
+
+
+def write_mtp(path, tasks, preset_map, cancel, emit):
+    files_arr=[];ocr_dict={};ts_dict={};tl_dict={}
+    for idx,p in enumerate(tasks):
+        if cancel.is_set():raise Cancelled()
+        name=Path(p.path).name
+        emit(('log',f'แพ็กข้อมูล .mtp หน้า {idx+1}/{len(tasks)}: {name}'))
+        im=load_image(p.path)
+        W,H=im.size
+        files_arr.append({
+            'name':name,'type':'image/jpeg','width':W,'height':H,
+            'dataUrl':_encode_data_url(im,'JPEG',92),
+        })
+        ocr_list=[];ts_list=[];tl_list=[]
+        patch_by_bid={pt.get('bubble_id'):pt for pt in p.clean_patches if pt.get('bubble_id')}
+        used_patches=set()
+        for b_i,b in enumerate(p.bubbles,1):
+            tid_num=int(time.time()*1000)+idx*1000+b_i
+            layer_id=f'ts_layer_{idx+1:02d}_{b_i}'
+            q=frame_quad(b)
+            ft=getattr(b,'frame_type','') or 'normal'
+            mtp_ft={'thought':'think','narration':'narr_in','floating':'small','terrible':'scream','happy':'normal','phone':'normal'}.get(ft,ft)
+            ocr_list.append({
+                'id':tid_num,'box':q,'text':b.text,'originalText':b.text,
+                'translation':b.translation,'visible':True,'selected':False,'fontType':mtp_ft,
+            })
+            pt=patch_by_bid.get(b.id)
+            if pt is not None:
+                used_patches.add(id(pt))
+                rgba_p=decode_patch(pt)
+                ts_list.append({
+                    'id':f'inpaint_{idx+1:02d}_{b_i}','type':'inpaint','targetLayerId':tid_num,
+                    'inpaintModel':pt.get('method') or 'lama',
+                    'patchUrl':_encode_data_url(rgba_p,'PNG'),
+                    'patchExpansion':0,'patchRect':list(pt['box']),
+                    'inpaintVisible':True,'visible':True,'selected':False,
+                    'box':q,'text':'','originalText':'','translation':'','isExternalEdit':False,
+                })
+            ts_list.append({
+                'id':tid_num,'box':q,'text':b.text,'originalText':b.text,
+                'translation':b.translation,'visible':True,'selected':False,
+                'type':'text','fontType':mtp_ft,'targetLayerId':layer_id,
+                'inpaintModel':None,'patchUrl':None,'patchExpansion':0,
+                'patchRect':list(b.box),'inpaintVisible':True,
+            })
+            if b.translation.strip():
+                tb=(b.text_layer.get('box') if b.text_layer else None) or b.box
+                fsz=int(round(b.text_layer.get('font_size',24))) if b.text_layer else 24
+                col='#FFFFFF' if (b.text_layer and b.text_layer.get('color')==[255,255,255]) else '#000000'
+                tl_list.append({
+                    'id':layer_id,'type':'text','number':b_i,
+                    'text':(b.text_layer.get('text') if b.text_layer else None) or b.translation,
+                    'x':int(round((tb[0]+tb[2])/2.0)),'y':int(round((tb[1]+tb[3])/2.0)),
+                    'boxWidth':max(20,int(round(b.box[2]-b.box[0]))),
+                    'boxHeight':max(20,int(round(b.box[3]-b.box[1]))),
+                    'size':fsz,'fontSize':fsz,'fontType':mtp_ft,
+                    'fontFamily':getattr(b,'font_choice',DEFAULT_FONT_CHOICE),
+                    'weight':'bold','style':'normal','color':col,
+                    'rot':float(b.text_layer.get('rotation',0) if b.text_layer else 0),
+                    'align':'center','textAlign':'center','lineHeight':1.2,
+                    'letterSpacing':0,'opacity':1,'visible':True,'selected':False,
+                })
+        for u_i,pt in enumerate(p.clean_patches,1):
+            if id(pt) in used_patches:continue
+            rgba_p=decode_patch(pt);pb=list(pt['box'])
+            ts_list.insert(0,{
+                'id':f'inpaint_free_{idx+1:02d}_{u_i}','type':'inpaint','targetLayerId':None,
+                'inpaintModel':pt.get('method') or 'lama',
+                'patchUrl':_encode_data_url(rgba_p,'PNG'),
+                'patchExpansion':0,'patchRect':pb,'inpaintVisible':True,
+                'visible':True,'selected':False,'box':box_quad(pb),
+                'text':'','originalText':'','translation':'','isExternalEdit':False,
+            })
+        ocr_dict[name]=ocr_list;ts_dict[name]=ts_list;tl_dict[name]=tl_list
+        emit(('progress',(idx+1)/len(tasks)*100))
+
+    mtp_obj={
+        'version':'1.0.0',
+        'savedAt':datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z'),
+        'currentMode':'ts',
+        'currentFileIndex':0,
+        'appSettings':{'readingDirection':'ttb'},
+        'fontRegistry':{
+            'normal':preset_map.get('normal',DEFAULT_FONT_CHOICE),
+            'shout':preset_map.get('shout',DEFAULT_FONT_CHOICE),
+            'think':preset_map.get('thought',DEFAULT_FONT_CHOICE),
+            'thought':preset_map.get('thought',DEFAULT_FONT_CHOICE),
+            'narr_in':preset_map.get('narration',DEFAULT_FONT_CHOICE),
+            'narr_out':preset_map.get('narration',DEFAULT_FONT_CHOICE),
+            'narration':preset_map.get('narration',DEFAULT_FONT_CHOICE),
+            'system':preset_map.get('system',DEFAULT_FONT_CHOICE),
+            'small':preset_map.get('floating',DEFAULT_FONT_CHOICE),
+            'scream':preset_map.get('shout',DEFAULT_FONT_CHOICE),
+            'sfx':preset_map.get('floating',DEFAULT_FONT_CHOICE),
+        },
+        'fontRealNameMap':{},'fontPresetStyles':{},'fontFilesData':{},
+        'files':files_arr,'bannerData':{'top':None,'bottom':None},
+        'ocrData':ocr_dict,'tsData':ts_dict,'textLayersData':tl_dict,
+        'textGroupsData':{},'detectedBubbles':{},'paintData':{},
+        'originalImages':{},'originalTsData':{},'originalOcrData':{},
+    }
+    atomic_json(path,mtp_obj)
+    emit(('job_summary',f'ส่งออกไฟล์ .mtp สำเร็จ ({len(tasks)} หน้า): {path}'))
+    return None
+
+
+def stitch_pages(src_pages, src_drafts, rough_height, width_mode, custom_width, detector_type, sensitivity, scan_step, ignore_margin, out_dir, cancel, emit, strict=False):
+    from text_layout import scale_text_layer,fast_direct_layer
+    emit(('log',f'SmartStitch: กำลังโหลดและปรับขนาดภาพต้นฉบับ {len(src_pages)} หน้า…'))
+    loaded=[]
+    for p in src_pages:
+        if cancel.is_set():raise Cancelled()
+        loaded.append((p,load_image(p.path)))
+
+    if width_mode=='User Customized Width':
+        target_w=int(custom_width)
+    elif width_mode=='Automatic Uniform Width':
+        target_w=min(im.width for _,im in loaded)
+    else:
+        target_w=loaded[0][1].width
+
+    strips=[]
+    global_bubbles=[]
+    global_patches=[]
+    global_drafts=[]
+    protected_spans=[]
+    y_cursor=0
+
+    for idx,(p,im) in enumerate(loaded):
+        if cancel.is_set():raise Cancelled()
+        w0,h0=im.size
+        sx=float(target_w)/max(1.0,float(w0)) if (width_mode!='No Enforcement' or w0!=target_w) else 1.0
+        nw=int(target_w)
+        nh=max(16,int(round(h0*sx)))
+        sy=float(nh)/max(1.0,float(h0))
+        im_scaled=im.resize((nw,nh),Image.Resampling.LANCZOS) if (nw,nh)!=(w0,h0) else im
+        strips.append((y_cursor,nh,im_scaled))
+
+        for b in p.bubbles:
+            nb=copy.deepcopy(b)
+            old_layer=copy.deepcopy(b.text_layer) if b.text_layer else None
+            lx0=max(0.0,min(float(nw-2),float(b.box[0])*sx))
+            ly0=max(0.0,min(float(nh-2),float(b.box[1])*sy))
+            lx1=max(lx0+4.0,min(float(nw),float(b.box[2])*sx))
+            ly1=max(ly0+4.0,min(float(nh),float(b.box[3])*sy))
+            nb.box=[lx0,ly0+y_cursor,lx1,ly1+y_cursor]
+            if b.quad and valid_quad(b.quad):
+                nb.quad=[[max(0.0,min(float(nw),float(qx)*sx)),
+                          max(0.0,min(float(nh),float(qy)*sy))+y_cursor] for qx,qy in b.quad]
+                if valid_quad(nb.quad):
+                    nb.box=quad_bounds(nb.quad)
+                else:
+                    nb.quad=[]
+            new_lines=[]
+            for rec in b.lines:
+                lb=rec.get('box')
+                if not lb or len(lb)!=4:continue
+                rlx0=max(0.0,min(float(nw-2),float(lb[0])*sx))
+                rly0=max(0.0,min(float(nh-2),float(lb[1])*sy))
+                rlx1=max(rlx0+2.0,min(float(nw),float(lb[2])*sx))
+                rly1=max(rly0+2.0,min(float(nh),float(lb[3])*sy))
+                nrec=dict(rec,box=[rlx0,rly0+y_cursor,rlx1,rly1+y_cursor])
+                if rec.get('quad') and valid_quad(rec['quad']):
+                    nrec['quad']=[[float(qx)*sx,float(qy)*sy+y_cursor] for qx,qy in rec['quad']]
+                new_lines.append(nrec)
+            nb.lines=new_lines
+            if getattr(b,'custom_size',0)>0:
+                nb.custom_size=max(6,int(round(b.custom_size*min(sx,sy))))
+            if getattr(b,'custom_width',0)>0:
+                nb.custom_width=max(24,int(round(b.custom_width*sx)))
+            if getattr(b,'text_offset',[]) and len(b.text_offset)==2:
+                nb.text_offset=[round(b.text_offset[0]*sx,2),round(b.text_offset[1]*sy,2)]
+            nb.text_layer={}
+            global_bubbles.append((nb,old_layer,sx,sy,y_cursor))
+            protected_spans.append((nb.box[1]-4,nb.box[3]+4))
+
+        for pt in p.clean_patches:
+            rgba=decode_patch(pt)
+            pb=pt['box']
+            px0=max(0,min(nw-2,int(round(pb[0]*sx))))
+            py0=max(0,min(nh-2,int(round(pb[1]*sy))))
+            px1=max(px0+2,min(nw,int(round(pb[2]*sx))))
+            py1=max(py0+2,min(nh,int(round(pb[3]*sy))))
+            pw_s=px1-px0;ph_s=py1-py0
+            if (pw_s,ph_s)!=rgba.size:
+                rgb_s=rgba.convert('RGB').resize((pw_s,ph_s),Image.Resampling.LANCZOS)
+                a_s=rgba.getchannel('A').resize((pw_s,ph_s),Image.Resampling.BILINEAR)
+                a_np=(np.asarray(a_s)>96).astype(np.uint8)*255
+            else:
+                rgb_s=rgba.convert('RGB')
+                a_np=(np.asarray(rgba.getchannel('A'))>0).astype(np.uint8)*255
+            global_patches.append({
+                'gbox':[px0,py0+y_cursor,px1,py1+y_cursor],
+                'rgb':rgb_s,'mask':a_np,
+                'method':pt.get('method','lama'),
+                'bubble_id':pt.get('bubble_id',''),
+                'quality':pt.get('quality',{}),
+            })
+            protected_spans.append((py0+y_cursor-2,py1+y_cursor+2))
+
+        for b in p.bubbles:
+            reg=src_drafts.get((p.id,b.id))
+            if reg is None:continue
+            rb=reg.box
+            rx0=max(0,min(nw-2,int(round(rb[0]*sx))))
+            ry0=max(0,min(nh-2,int(round(rb[1]*sy))))
+            rx1=max(rx0+2,min(nw,int(round(rb[2]*sx))))
+            ry1=max(ry0+2,min(nh,int(round(rb[3]*sy))))
+            rw_s=rx1-rx0;rh_s=ry1-ry0
+            r_img=reg.image.resize((rw_s,rh_s),Image.Resampling.LANCZOS)
+            r_mask=(np.asarray(Image.fromarray(reg.mask).resize((rw_s,rh_s),Image.Resampling.NEAREST))>0).astype(np.uint8)*255
+            r_safe=(np.asarray(Image.fromarray(reg.safe).resize((rw_s,rh_s),Image.Resampling.NEAREST))>0).astype(np.uint8)*255
+            global_drafts.append((b.id,[rx0,ry0+y_cursor,rx1,ry1+y_cursor],r_img,r_mask,r_safe,reg))
+
+        y_cursor+=nh
+        emit(('progress',(idx+1)/len(loaded)*40))
+
+    total_h=y_cursor
+    emit(('log',f'SmartStitch: ความสูงรวม {total_h:,} px (กว้าง {target_w} px) — กำลังหาจุดตัดหลบบับเบิ้ล…'))
+    cuts=_find_smart_cuts(
+        strips,total_h,rough_height,
+        detector_type=detector_type,sensitivity=sensitivity,
+        scan_step=scan_step,ignore_margin=ignore_margin,
+        protected_spans=protected_spans,
+    )
+    if strict:
+        # Protect long spans as well, even if this requires exceeding the target height.
+        intervals=sorted((max(1,a),min(total_h-1,b)) for a,b in protected_spans)
+        safe=[0]
+        for cut in cuts[1:-1]:
+            for lo,hi in intervals:
+                if lo<=cut<=hi:cut=hi+1
+            if safe[-1]<cut<total_h:safe.append(cut)
+        cuts=safe+[total_h]
+        if max(b-a for a,b in zip(cuts,cuts[1:]))>29400:
+            raise ValueError('Cannot split within the PSD height limit without cutting a protected region')
+    num_slices=len(cuts)-1
+    out_dir.mkdir(parents=True,exist_ok=True)
+    stamp=datetime.now().strftime('%H%M%S')
+    use_suffix=any((out_dir/f'{i+1:02d}.png').exists() for i in range(num_slices))
+
+    new_pages=[];new_drafts={};laid_count=0
+    for s_idx in range(num_slices):
+        if cancel.is_set():raise Cancelled()
+        cy0,cy1=cuts[s_idx],cuts[s_idx+1]
+        sh=cy1-cy0
+        fname=f'{s_idx+1:02d}_{stamp}.png' if use_suffix else f'{s_idx+1:02d}.png'
+        dest_img=out_dir/fname
+        emit(('log',f'SmartStitch: บันทึกหน้าใหม่ {s_idx+1}/{num_slices} ({target_w}×{sh} px) → {fname}'))
+        slice_im=_crop_stitched_slice_rgb(strips,cy0,cy1)
+        slice_im.save(dest_img,format='PNG',compress_level=1)
+
+        page_bs_meta=[]
+        for gb,old_layer,b_sx,b_sy,b_ycur in global_bubbles:
+            bcy=(gb.box[1]+gb.box[3])*0.5
+            in_slice=(cy0<=bcy<cy1) or (s_idx==num_slices-1 and bcy>=cy0)
+            if not in_slice:continue
+            lb_copy=copy.deepcopy(gb)
+            lb_copy.box=clip_box([gb.box[0],gb.box[1]-cy0,gb.box[2],gb.box[3]-cy0],target_w,sh)
+            if lb_copy.quad:
+                lb_copy.quad=[[qx,max(0.0,min(float(sh),qy-cy0))] for qx,qy in lb_copy.quad]
+                if valid_quad(lb_copy.quad):
+                    lb_copy.box=quad_bounds(lb_copy.quad)
+                else:
+                    lb_copy.quad=[]
+            shifted_ls=[]
+            for rec in lb_copy.lines:
+                rb=rec['box']
+                srec=dict(rec,box=clip_box([rb[0],rb[1]-cy0,rb[2],rb[3]-cy0],target_w,sh))
+                if rec.get('quad'):
+                    srec['quad']=[[qx,max(0.0,min(float(sh),qy-cy0))] for qx,qy in rec['quad']]
+                shifted_ls.append(srec)
+            lb_copy.lines=shifted_ls
+            if area(lb_copy.box)>16:
+                page_bs_meta.append((lb_copy,old_layer,b_sx,b_sy,b_ycur-cy0))
+        page_bs_meta.sort(key=lambda item:(item[0].box[1],item[0].box[0]))
+        page_bs=[item[0] for item in page_bs_meta]
+        page_bids={b.id for b in page_bs}
+
+        page_pts=[]
+        for gp in global_patches:
+            gx0,gy0,gx1,gy1=gp['gbox']
+            iy0=max(cy0,gy0);iy1=min(cy1,gy1)
+            if iy1-iy0<2:continue
+            top_cut=iy0-gy0;bot_cut=iy1-gy0
+            sub_rgb=gp['rgb'].crop((0,top_cut,gx1-gx0,bot_cut))
+            sub_mask=gp['mask'][top_cut:bot_cut,:]
+            if not np.any(sub_mask):continue
+            local_box=[gx0,iy0-cy0,gx1,iy1-cy0]
+            bid_ref=gp['bubble_id'] if gp['bubble_id'] in page_bids else ''
+            prec=encode_patch(local_box,sub_rgb,sub_mask,gp['method'],bid_ref)
+            if gp.get('quality'):prec['quality']=dict(gp['quality'])
+            page_pts.append(prec)
+
+        p_new=Page(str(dest_img.resolve()),page_bs,'',True,uid(),page_pts)
+
+        for bid,gbox,r_img,r_mask,r_safe,orig_reg in global_drafts:
+            if bid not in page_bids:continue
+            gx0,gy0,gx1,gy1=gbox
+            iy0=max(cy0,gy0);iy1=min(cy1,gy1)
+            if iy1-iy0<8:continue
+            tc=iy0-gy0;bc=iy1-gy0
+            c_im=r_img.crop((0,tc,gx1-gx0,bc))
+            new_drafts[(p_new.id,bid)]=CleanRegion(
+                [gx0,iy0-cy0,gx1,iy1-cy0],c_im,r_mask[tc:bc,:].copy(),r_safe[tc:bc,:].copy(),
+                orig_reg.boundary_found,orig_reg.note,orig_reg.manual_frame,orig_reg.manual_edited,
+            )
+
+        work_slice=compose_page(slice_im,page_pts) if page_pts else slice_im
+        for b_item,old_layer,b_sx,b_sy,shift_y in page_bs_meta:
+            if not b_item.translation.strip():continue
+            try:
+                if old_layer:
+                    b_item.text_layer=scale_text_layer(work_slice,b_item,old_layer,b_sx,b_sy,shift_y)
+                else:
+                    b_item.text_layer=fast_direct_layer(
+                        work_slice,b_item,b_item.translation,
+                        font_choice=getattr(b_item,'font_choice',DEFAULT_FONT_CHOICE),
+                    )
+                if b_item.text_layer.get('font_choice'):
+                    b_item.font_choice=b_item.text_layer['font_choice']
+                laid_count+=1
+            except Exception as exc:
+                emit(('log',f'ปรับ Text ({fname}): {exc}'))
+
+        new_pages.append(p_new)
+        emit(('progress',40+60*(s_idx+1)/num_slices))
+
+    summary=(f'SmartStitch สำเร็จรวดเร็ว! รวมจาก {len(src_pages)} หน้า → เหลือ {len(new_pages)} หน้า '
+             f'(กว้าง {target_w}px, สูง ~{rough_height}px) • กรอบ {sum(len(p.bubbles) for p in new_pages)} ช่อง • '
+             f'แผ่นคลีน {sum(len(p.clean_patches) for p in new_pages)} จุด • Text {laid_count} ช่องครบ 100% (Ctrl+Z ย้อนกลับได้)')
+    return new_pages,new_drafts,summary
+
+
+def read_project_pages(data,path):
+    pages=[];drafts={}
+    missing=[]
+    seen_ids=set()
+    for record in data['pages']:
+        bs=[Bubble(**b) for b in record['bubbles']]
+        for b in bs:
+            if not isinstance(b.id,str) or not b.id or b.id in seen_ids:
+                raise ValueError('พบรหัสกรอบซ้ำหรือไม่ถูกต้องในโปรเจกต์')
+            seen_ids.add(b.id)
+            if b.quad:
+                if not valid_quad(b.quad):raise ValueError('พบมุมกรอบเอียงที่ไม่ถูกต้องในโปรเจกต์')
+                b.box=quad_bounds(b.quad)
+            if b.text_layer:
+                from text_layout import validate_layer,normalize_font_choice,_normalize_rotation
+                validate_layer(b.text_layer)
+                b.font_choice=normalize_font_choice(b.text_layer.get('font_choice',b.font_choice))
+                b.custom_size=int(b.text_layer.get('custom_size',b.custom_size) or 0)
+                b.custom_width=int(b.text_layer.get('custom_width',b.custom_width) or 0)
+                b.text_offset=list(b.text_layer.get('text_offset',b.text_offset) or [])
+                if 'custom_rotation' in b.text_layer:
+                    b.custom_rotation=_normalize_rotation(b.text_layer.get('custom_rotation'))
+            if len(b.box)!=4 or not all(isinstance(v,(int,float)) and np.isfinite(v) for v in b.box) or area(b.box)<=0:
+                raise ValueError('พบพิกัดกรอบที่ไม่ถูกต้องในโปรเจกต์')
+        image_path=Path(record['path'])
+        if not image_path.is_absolute():
+            image_path=Path(path).parent/image_path
+        p=Page(str(image_path.resolve()),bs,record.get('error',''),record.get('processed',False),record.get('id',uid()))
+        p.clean_patches=record.get('clean_patches',[])
+        for patch in p.clean_patches:decode_patch(patch)
+        for bid,draft in record.get('clean_drafts',{}).items():
+            if bid not in {b.id for b in bs}:raise ValueError('มาสก์อ้างถึงกรอบที่ไม่มีในโปรเจกต์')
+            drafts[(p.id,bid)]=decode_region(draft)
+        pages.append(p)
+        if not image_path.is_file():
+            missing.append(p)
+    return pages,drafts,missing
+
+
 class ManhwaOCRApp:
     def __init__(self, root):
         self.root = root
@@ -3145,41 +3714,7 @@ class ManhwaOCRApp:
                 raise ValueError('ไฟล์นี้ไม่ใช่โปรเจกต์ Manhwa OCR Editor หรือไฟล์ .mtp ที่รองรับ')
             if data.get('font_preset') in self.font_presets_map:
                 self.font_preset.set(data['font_preset'])
-            pages=[];drafts={}
-            missing=[]
-            seen_ids=set()
-            for record in data['pages']:
-                bs=[Bubble(**b) for b in record['bubbles']]
-                for b in bs:
-                    if not isinstance(b.id,str) or not b.id or b.id in seen_ids:
-                        raise ValueError('พบรหัสกรอบซ้ำหรือไม่ถูกต้องในโปรเจกต์')
-                    seen_ids.add(b.id)
-                    if b.quad:
-                        if not valid_quad(b.quad):raise ValueError('พบมุมกรอบเอียงที่ไม่ถูกต้องในโปรเจกต์')
-                        b.box=quad_bounds(b.quad)
-                    if b.text_layer:
-                        from text_layout import validate_layer,normalize_font_choice,_normalize_rotation
-                        validate_layer(b.text_layer)
-                        b.font_choice=normalize_font_choice(b.text_layer.get('font_choice',b.font_choice))
-                        b.custom_size=int(b.text_layer.get('custom_size',b.custom_size) or 0)
-                        b.custom_width=int(b.text_layer.get('custom_width',b.custom_width) or 0)
-                        b.text_offset=list(b.text_layer.get('text_offset',b.text_offset) or [])
-                        if 'custom_rotation' in b.text_layer:
-                            b.custom_rotation=_normalize_rotation(b.text_layer.get('custom_rotation'))
-                    if len(b.box)!=4 or not all(isinstance(v,(int,float)) and np.isfinite(v) for v in b.box) or area(b.box)<=0:
-                        raise ValueError('พบพิกัดกรอบที่ไม่ถูกต้องในโปรเจกต์')
-                image_path=Path(record['path'])
-                if not image_path.is_absolute():
-                    image_path=Path(path).parent/image_path
-                p=Page(str(image_path.resolve()),bs,record.get('error',''),record.get('processed',False),record.get('id',uid()))
-                p.clean_patches=record.get('clean_patches',[])
-                for patch in p.clean_patches:decode_patch(patch)
-                for bid,draft in record.get('clean_drafts',{}).items():
-                    if bid not in {b.id for b in bs}:raise ValueError('มาสก์อ้างถึงกรอบที่ไม่มีในโปรเจกต์')
-                    drafts[(p.id,bid)]=decode_region(draft)
-                pages.append(p)
-                if not image_path.is_file():
-                    missing.append(p)
+            pages,drafts,missing=read_project_pages(data,path)
             if missing:
                 folder=filedialog.askdirectory(title='ไม่พบภาพต้นฉบับ เลือกโฟลเดอร์ภาพเพื่อเชื่อมใหม่ (ยกเลิกเพื่อเปิดเฉพาะข้อความ)')
                 for p in missing:
@@ -3211,200 +3746,7 @@ class ManhwaOCRApp:
     def _open_mtp_file(self,mtp_path):
         mtp_file=Path(mtp_path)
         def work():
-            from text_layout import fast_direct_layer,normalize_font_choice,resolve_font
-            self.events.put(('log',f'กำลังอ่านไฟล์ .mtp: {mtp_file.name}…'))
-            data=json.loads(mtp_file.read_text(encoding='utf-8-sig'))
-            files_list=data.get('files')
-            if not isinstance(files_list,list) or not files_list:
-                raise ValueError('ไม่พบรายการรูปภาพ (files) ในไฟล์ .mtp นี้')
-
-            safe_stem=re.sub(r'[<>:"/\\|?*]+','_',mtp_file.stem).strip() or 'mtp_project'
-            extract_dir=mtp_file.parent/(safe_stem+'_mtp_pages')
-            try:
-                extract_dir.mkdir(parents=True,exist_ok=True)
-            except OSError:
-                h_tag=hashlib.md5(str(mtp_file).encode('utf-8',errors='ignore')).hexdigest()[:10]
-                extract_dir=DATA_DIR/'mtp_pages'/(safe_stem[:40]+'_'+h_tag)
-                extract_dir.mkdir(parents=True,exist_ok=True)
-
-            font_reg=data.get('fontRegistry') if isinstance(data.get('fontRegistry'),dict) else {}
-            ts_all=data.get('tsData') if isinstance(data.get('tsData'),dict) else {}
-            ocr_all=data.get('ocrData') if isinstance(data.get('ocrData'),dict) else {}
-            tl_all=data.get('textLayersData') if isinstance(data.get('textLayersData'),dict) else {}
-
-            def safe_font(raw_name):
-                cand=normalize_font_choice(raw_name)
-                try:
-                    resolve_font(cand)
-                    return cand
-                except Exception:
-                    return DEFAULT_FONT_CHOICE
-
-            pages_out=[]
-            total_bubbles=0;total_patches=0;total_laid=0
-            for idx,f_rec in enumerate(files_list):
-                if self.cancel.is_set():raise Cancelled()
-                raw_name=str(f_rec.get('name') or f'{idx+1:02d}.jpg')
-                clean_name=Path(raw_name).name
-                if Path(clean_name).suffix.lower() not in IMAGE_EXTS:
-                    clean_name+=('.png' if 'png' in str(f_rec.get('type','')).lower() else '.jpg')
-                img_dest=extract_dir/clean_name
-                self.events.put(('log',f'แกะข้อมูล .mtp หน้า {idx+1}/{len(files_list)}: {clean_name}'))
-                img_bytes=_decode_data_url(f_rec.get('dataUrl',''))
-                if not img_dest.is_file() or img_dest.stat().st_size!=len(img_bytes):
-                    tmp_img=img_dest.with_name(img_dest.name+'.'+uid()+'.tmp')
-                    try:
-                        tmp_img.write_bytes(img_bytes)
-                        os.replace(tmp_img,img_dest)
-                    finally:
-                        tmp_img.unlink(missing_ok=True)
-
-                im=load_image(img_dest)
-                W,H=im.size
-                ts_page=_mtp_page_lookup(ts_all,raw_name,idx)
-                ocr_page=_mtp_page_lookup(ocr_all,raw_name,idx)
-                tl_page=_mtp_page_lookup(tl_all,raw_name,idx)
-                tl_by_id={str(t.get('id')):t for t in tl_page if isinstance(t,dict) and t.get('id') is not None}
-                used_tl_ids=set()
-
-                text_entries=[it for it in ts_page if isinstance(it,dict) and it.get('type')=='text' and it.get('visible',True) is not False]
-                if not text_entries:
-                    text_entries=[it for it in ocr_page if isinstance(it,dict)]
-
-                page_bubbles=[]
-                layer_hints={}
-                mtp_id_to_bid={}
-                for t_it in text_entries:
-                    raw_b=t_it.get('box')
-                    q=[]
-                    if isinstance(raw_b,list) and len(raw_b)==4 and isinstance(raw_b[0],(list,tuple)):
-                        bbox=clip_box(polygon_box(raw_b),W,H)
-                        if valid_quad(raw_b) and abs(quad_angle(raw_b))>=1.5:
-                            q=[[float(pt[0]),float(pt[1])] for pt in raw_b]
-                    elif isinstance(raw_b,list) and len(raw_b)==4:
-                        bbox=clip_box(raw_b,W,H)
-                    else:
-                        continue
-                    if area(bbox)<=16:continue
-
-                    tl=tl_by_id.get(str(t_it.get('targetLayerId','')))
-                    if tl is not None:
-                        used_tl_ids.add(str(tl.get('id')))
-                    src_txt=str(t_it.get('originalText') or t_it.get('text') or '').strip()
-                    trn_txt=str(t_it.get('translation') or (tl.get('text') if tl else '') or '').strip()
-                    ft_raw=str(t_it.get('fontType') or (tl.get('fontType') if tl else '') or 'normal').lower()
-                    ftype=MTP_TYPE_TO_FRAME.get(ft_raw,'normal')
-                    raw_font=(tl.get('fontFamily') if tl else None) or font_reg.get(ft_raw) or DEFAULT_FONT_CHOICE
-                    f_choice=safe_font(raw_font)
-
-                    b_obj=Bubble(
-                        box=bbox,
-                        text=src_txt,
-                        translation=trn_txt,
-                        lines=[asdict(Line(src_txt or trn_txt,bbox,0.99,'MTP',q))],
-                        score=0.99,
-                        engine='MTP',
-                        reviewed=True,
-                        quad=q,
-                        font_choice=f_choice,
-                        frame_type=ftype,
-                    )
-                    if tl is not None:
-                        pref_sz=int(round(float(tl.get('fontSize') or tl.get('size') or 0)))
-                        pref_xy=(float(tl['x']),float(tl['y'])) if ('x' in tl and 'y' in tl) else None
-                        raw_rot=float(tl.get('rot') or 0.0)
-                        pref_rot=raw_rot if abs(raw_rot)>=0.2 else None
-                        layer_hints[b_obj.id]=(pref_sz,pref_xy,pref_rot)
-                    page_bubbles.append(b_obj)
-                    if t_it.get('id') is not None:
-                        mtp_id_to_bid[str(t_it.get('id'))]=b_obj.id
-
-                for tl in tl_page:
-                    if not isinstance(tl,dict) or tl.get('visible',True) is False:continue
-                    tid=str(tl.get('id',''))
-                    if tid in used_tl_ids:continue
-                    trn_txt=str(tl.get('text') or '').strip()
-                    if not trn_txt:continue
-                    cx=float(tl.get('x',W/2.0));cy=float(tl.get('y',H/2.0))
-                    bw_l=max(24.0,float(tl.get('boxWidth') or 140.0))
-                    bh_l=max(24.0,float(tl.get('boxHeight') or 80.0))
-                    bbox=clip_box([cx-bw_l/2.0,cy-bh_l/2.0,cx+bw_l/2.0,cy+bh_l/2.0],W,H)
-                    if area(bbox)<=16:continue
-                    ft_raw=str(tl.get('fontType') or 'normal').lower()
-                    b_obj=Bubble(
-                        box=bbox,
-                        text='',
-                        translation=trn_txt,
-                        lines=[],
-                        score=0.99,
-                        engine='MTP',
-                        reviewed=True,
-                        font_choice=safe_font(tl.get('fontFamily') or DEFAULT_FONT_CHOICE),
-                        frame_type=MTP_TYPE_TO_FRAME.get(ft_raw,'normal'),
-                    )
-                    pref_sz=int(round(float(tl.get('fontSize') or tl.get('size') or 0)))
-                    raw_rot=float(tl.get('rot') or 0.0)
-                    pref_rot=raw_rot if abs(raw_rot)>=0.2 else None
-                    layer_hints[b_obj.id]=(pref_sz,(cx,cy),pref_rot)
-                    page_bubbles.append(b_obj)
-
-                page_bubbles.sort(key=lambda b:(b.box[1],b.box[0]))
-
-                patches_out=[]
-                for p_it in ts_page:
-                    if not isinstance(p_it,dict) or p_it.get('type')!='inpaint':continue
-                    if p_it.get('inpaintVisible',True) is False or p_it.get('visible',True) is False:continue
-                    purl=str(p_it.get('patchUrl') or '')
-                    if not purl.startswith('data:image/'):continue
-                    try:
-                        p_bytes=_decode_data_url(purl)
-                        with Image.open(io.BytesIO(p_bytes)) as pim:
-                            p_rgba=pim.convert('RGBA')
-                        pw,ph=p_rgba.size
-                        pr=p_it.get('patchRect') or [0,0,pw,ph]
-                        px0=max(0,min(W-2,int(round(float(pr[0])))))
-                        py0=max(0,min(H-2,int(round(float(pr[1])))))
-                        cw_p=min(pw,W-px0);ch_p=min(ph,H-py0)
-                        if cw_p<2 or ch_p<2:continue
-                        if (cw_p,ch_p)!=(pw,ph):
-                            p_rgba=p_rgba.crop((0,0,cw_p,ch_p))
-                        pbox=[px0,py0,px0+cw_p,py0+ch_p]
-                        alpha_np=np.asarray(p_rgba.getchannel('A'))
-                        pmask=((alpha_np>16).astype(np.uint8)*255) if int(alpha_np.min())<250 else np.full((ch_p,cw_p),255,dtype=np.uint8)
-                        linked_bid=mtp_id_to_bid.get(str(p_it.get('targetLayerId','')),'')
-                        method_p=str(p_it.get('inpaintModel') or 'lama')
-                        patch_rec=encode_patch(pbox,p_rgba.convert('RGB'),pmask,method_p,linked_bid)
-                        patch_rec['quality']={'passes':1,'remaining':[],'verification_error':'','visual_checked':True,'visual_residual_pixels':0,'needs_review':False}
-                        patches_out.append(patch_rec)
-                    except Exception as exc:
-                        self.events.put(('log',f'ข้ามแผ่นคลีนบางจุดใน {clean_name}: {exc}'))
-
-                work_im=compose_page(im,patches_out) if patches_out else im
-                for b_obj in page_bubbles:
-                    if b_obj.translation.strip():
-                        pref_sz,pref_xy,pref_rot=layer_hints.get(b_obj.id,(0,None,None))
-                        try:
-                            b_obj.text_layer=fast_direct_layer(
-                                work_im,b_obj,b_obj.translation,
-                                font_choice=b_obj.font_choice,
-                                preferred_size=pref_sz,center_xy=pref_xy,preferred_rot=pref_rot,
-                            )
-                            if b_obj.text_layer.get('font_choice'):
-                                b_obj.font_choice=b_obj.text_layer['font_choice']
-                            total_laid+=1
-                        except Exception as exc:
-                            self.events.put(('log',f'จัด Text {clean_name}: {exc}'))
-
-                p_obj=Page(str(img_dest.resolve()),page_bubbles,'',True,uid(),patches_out)
-                pages_out.append(p_obj)
-                total_bubbles+=len(page_bubbles);total_patches+=len(patches_out)
-                self.events.put(('progress',(idx+1)/len(files_list)*100))
-
-            suspect_total=sum(1 for pg in pages_out for bb in pg.bubbles if _is_suspect_mismatch(bb))
-            warn_tail=f' • ⚠ พบ {suspect_total} กรอบที่อาจติดเสียง SFX แทรกคิว' if suspect_total else ''
-            summary=(f'เปิดไฟล์ .mtp สำเร็จ: {len(pages_out)} หน้า • กรอบข้อความ {total_bubbles} ช่อง • '
-                     f'แผ่นคลีน {total_patches} จุด • วางคำแปลไทย {total_laid} ช่อง{warn_tail}')
-            self.events.put(('mtp_loaded',(pages_out,str(mtp_file),summary)))
+            self.events.put(('mtp_loaded',read_mtp(mtp_file,self.cancel,self.events.put)))
             return True
         self.launch(work)
 
@@ -3419,107 +3761,7 @@ class ManhwaOCRApp:
         tasks=copy.deepcopy(self.pages)
         preset_map=dict(self.font_presets_map.get(self.font_preset.get(),{}))
         def work():
-            files_arr=[];ocr_dict={};ts_dict={};tl_dict={}
-            for idx,p in enumerate(tasks):
-                if self.cancel.is_set():raise Cancelled()
-                name=Path(p.path).name
-                self.events.put(('log',f'แพ็กข้อมูล .mtp หน้า {idx+1}/{len(tasks)}: {name}'))
-                im=load_image(p.path)
-                W,H=im.size
-                files_arr.append({
-                    'name':name,'type':'image/jpeg','width':W,'height':H,
-                    'dataUrl':_encode_data_url(im,'JPEG',92),
-                })
-                ocr_list=[];ts_list=[];tl_list=[]
-                patch_by_bid={pt.get('bubble_id'):pt for pt in p.clean_patches if pt.get('bubble_id')}
-                used_patches=set()
-                for b_i,b in enumerate(p.bubbles,1):
-                    tid_num=int(time.time()*1000)+idx*1000+b_i
-                    layer_id=f'ts_layer_{idx+1:02d}_{b_i}'
-                    q=frame_quad(b)
-                    ft=getattr(b,'frame_type','') or 'normal'
-                    mtp_ft={'thought':'think','narration':'narr_in','floating':'small','terrible':'scream','happy':'normal','phone':'normal'}.get(ft,ft)
-                    ocr_list.append({
-                        'id':tid_num,'box':q,'text':b.text,'originalText':b.text,
-                        'translation':b.translation,'visible':True,'selected':False,'fontType':mtp_ft,
-                    })
-                    pt=patch_by_bid.get(b.id)
-                    if pt is not None:
-                        used_patches.add(id(pt))
-                        rgba_p=decode_patch(pt)
-                        ts_list.append({
-                            'id':f'inpaint_{idx+1:02d}_{b_i}','type':'inpaint','targetLayerId':tid_num,
-                            'inpaintModel':pt.get('method') or 'lama',
-                            'patchUrl':_encode_data_url(rgba_p,'PNG'),
-                            'patchExpansion':0,'patchRect':list(pt['box']),
-                            'inpaintVisible':True,'visible':True,'selected':False,
-                            'box':q,'text':'','originalText':'','translation':'','isExternalEdit':False,
-                        })
-                    ts_list.append({
-                        'id':tid_num,'box':q,'text':b.text,'originalText':b.text,
-                        'translation':b.translation,'visible':True,'selected':False,
-                        'type':'text','fontType':mtp_ft,'targetLayerId':layer_id,
-                        'inpaintModel':None,'patchUrl':None,'patchExpansion':0,
-                        'patchRect':list(b.box),'inpaintVisible':True,
-                    })
-                    if b.translation.strip():
-                        tb=(b.text_layer.get('box') if b.text_layer else None) or b.box
-                        fsz=int(round(b.text_layer.get('font_size',24))) if b.text_layer else 24
-                        col='#FFFFFF' if (b.text_layer and b.text_layer.get('color')==[255,255,255]) else '#000000'
-                        tl_list.append({
-                            'id':layer_id,'type':'text','number':b_i,
-                            'text':(b.text_layer.get('text') if b.text_layer else None) or b.translation,
-                            'x':int(round((tb[0]+tb[2])/2.0)),'y':int(round((tb[1]+tb[3])/2.0)),
-                            'boxWidth':max(20,int(round(b.box[2]-b.box[0]))),
-                            'boxHeight':max(20,int(round(b.box[3]-b.box[1]))),
-                            'size':fsz,'fontSize':fsz,'fontType':mtp_ft,
-                            'fontFamily':getattr(b,'font_choice',DEFAULT_FONT_CHOICE),
-                            'weight':'bold','style':'normal','color':col,
-                            'rot':float(b.text_layer.get('rotation',0) if b.text_layer else 0),
-                            'align':'center','textAlign':'center','lineHeight':1.2,
-                            'letterSpacing':0,'opacity':1,'visible':True,'selected':False,
-                        })
-                for u_i,pt in enumerate(p.clean_patches,1):
-                    if id(pt) in used_patches:continue
-                    rgba_p=decode_patch(pt);pb=list(pt['box'])
-                    ts_list.insert(0,{
-                        'id':f'inpaint_free_{idx+1:02d}_{u_i}','type':'inpaint','targetLayerId':None,
-                        'inpaintModel':pt.get('method') or 'lama',
-                        'patchUrl':_encode_data_url(rgba_p,'PNG'),
-                        'patchExpansion':0,'patchRect':pb,'inpaintVisible':True,
-                        'visible':True,'selected':False,'box':box_quad(pb),
-                        'text':'','originalText':'','translation':'','isExternalEdit':False,
-                    })
-                ocr_dict[name]=ocr_list;ts_dict[name]=ts_list;tl_dict[name]=tl_list
-                self.events.put(('progress',(idx+1)/len(tasks)*100))
-
-            mtp_obj={
-                'version':'1.0.0',
-                'savedAt':datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z'),
-                'currentMode':'ts',
-                'currentFileIndex':0,
-                'appSettings':{'readingDirection':'ttb'},
-                'fontRegistry':{
-                    'normal':preset_map.get('normal',DEFAULT_FONT_CHOICE),
-                    'shout':preset_map.get('shout',DEFAULT_FONT_CHOICE),
-                    'think':preset_map.get('thought',DEFAULT_FONT_CHOICE),
-                    'thought':preset_map.get('thought',DEFAULT_FONT_CHOICE),
-                    'narr_in':preset_map.get('narration',DEFAULT_FONT_CHOICE),
-                    'narr_out':preset_map.get('narration',DEFAULT_FONT_CHOICE),
-                    'narration':preset_map.get('narration',DEFAULT_FONT_CHOICE),
-                    'system':preset_map.get('system',DEFAULT_FONT_CHOICE),
-                    'small':preset_map.get('floating',DEFAULT_FONT_CHOICE),
-                    'scream':preset_map.get('shout',DEFAULT_FONT_CHOICE),
-                    'sfx':preset_map.get('floating',DEFAULT_FONT_CHOICE),
-                },
-                'fontRealNameMap':{},'fontPresetStyles':{},'fontFilesData':{},
-                'files':files_arr,'bannerData':{'top':None,'bottom':None},
-                'ocrData':ocr_dict,'tsData':ts_dict,'textLayersData':tl_dict,
-                'textGroupsData':{},'detectedBubbles':{},'paintData':{},
-                'originalImages':{},'originalTsData':{},'originalOcrData':{},
-            }
-            atomic_json(path,mtp_obj)
-            self.events.put(('job_summary',f'ส่งออกไฟล์ .mtp สำเร็จ ({len(tasks)} หน้า): {path}'))
+            write_mtp(path,tasks,preset_map,self.cancel,self.events.put)
             return True
         self.launch(work)
 
@@ -3620,220 +3862,7 @@ class ManhwaOCRApp:
         src_drafts=copy.deepcopy(self.clean_prepared)
 
         def work():
-            from text_layout import scale_text_layer,fast_direct_layer
-            self.events.put(('log',f'SmartStitch: กำลังโหลดและปรับขนาดภาพต้นฉบับ {len(src_pages)} หน้า…'))
-            loaded=[]
-            for p in src_pages:
-                if self.cancel.is_set():raise Cancelled()
-                loaded.append((p,load_image(p.path)))
-
-            if width_mode=='User Customized Width':
-                target_w=int(custom_width)
-            elif width_mode=='Automatic Uniform Width':
-                target_w=min(im.width for _,im in loaded)
-            else:
-                target_w=loaded[0][1].width
-
-            strips=[]
-            global_bubbles=[]
-            global_patches=[]
-            global_drafts=[]
-            protected_spans=[]
-            y_cursor=0
-
-            for idx,(p,im) in enumerate(loaded):
-                if self.cancel.is_set():raise Cancelled()
-                w0,h0=im.size
-                sx=float(target_w)/max(1.0,float(w0)) if (width_mode!='No Enforcement' or w0!=target_w) else 1.0
-                nw=int(target_w)
-                nh=max(16,int(round(h0*sx)))
-                sy=float(nh)/max(1.0,float(h0))
-                im_scaled=im.resize((nw,nh),Image.Resampling.LANCZOS) if (nw,nh)!=(w0,h0) else im
-                strips.append((y_cursor,nh,im_scaled))
-
-                for b in p.bubbles:
-                    nb=copy.deepcopy(b)
-                    old_layer=copy.deepcopy(b.text_layer) if b.text_layer else None
-                    lx0=max(0.0,min(float(nw-2),float(b.box[0])*sx))
-                    ly0=max(0.0,min(float(nh-2),float(b.box[1])*sy))
-                    lx1=max(lx0+4.0,min(float(nw),float(b.box[2])*sx))
-                    ly1=max(ly0+4.0,min(float(nh),float(b.box[3])*sy))
-                    nb.box=[lx0,ly0+y_cursor,lx1,ly1+y_cursor]
-                    if b.quad and valid_quad(b.quad):
-                        nb.quad=[[max(0.0,min(float(nw),float(qx)*sx)),
-                                  max(0.0,min(float(nh),float(qy)*sy))+y_cursor] for qx,qy in b.quad]
-                        if valid_quad(nb.quad):
-                            nb.box=quad_bounds(nb.quad)
-                        else:
-                            nb.quad=[]
-                    new_lines=[]
-                    for rec in b.lines:
-                        lb=rec.get('box')
-                        if not lb or len(lb)!=4:continue
-                        rlx0=max(0.0,min(float(nw-2),float(lb[0])*sx))
-                        rly0=max(0.0,min(float(nh-2),float(lb[1])*sy))
-                        rlx1=max(rlx0+2.0,min(float(nw),float(lb[2])*sx))
-                        rly1=max(rly0+2.0,min(float(nh),float(lb[3])*sy))
-                        nrec=dict(rec,box=[rlx0,rly0+y_cursor,rlx1,rly1+y_cursor])
-                        if rec.get('quad') and valid_quad(rec['quad']):
-                            nrec['quad']=[[float(qx)*sx,float(qy)*sy+y_cursor] for qx,qy in rec['quad']]
-                        new_lines.append(nrec)
-                    nb.lines=new_lines
-                    if getattr(b,'custom_size',0)>0:
-                        nb.custom_size=max(6,int(round(b.custom_size*min(sx,sy))))
-                    if getattr(b,'custom_width',0)>0:
-                        nb.custom_width=max(24,int(round(b.custom_width*sx)))
-                    if getattr(b,'text_offset',[]) and len(b.text_offset)==2:
-                        nb.text_offset=[round(b.text_offset[0]*sx,2),round(b.text_offset[1]*sy,2)]
-                    nb.text_layer={}
-                    global_bubbles.append((nb,old_layer,sx,sy,y_cursor))
-                    protected_spans.append((nb.box[1]-4,nb.box[3]+4))
-
-                for pt in p.clean_patches:
-                    rgba=decode_patch(pt)
-                    pb=pt['box']
-                    px0=max(0,min(nw-2,int(round(pb[0]*sx))))
-                    py0=max(0,min(nh-2,int(round(pb[1]*sy))))
-                    px1=max(px0+2,min(nw,int(round(pb[2]*sx))))
-                    py1=max(py0+2,min(nh,int(round(pb[3]*sy))))
-                    pw_s=px1-px0;ph_s=py1-py0
-                    if (pw_s,ph_s)!=rgba.size:
-                        rgb_s=rgba.convert('RGB').resize((pw_s,ph_s),Image.Resampling.LANCZOS)
-                        a_s=rgba.getchannel('A').resize((pw_s,ph_s),Image.Resampling.BILINEAR)
-                        a_np=(np.asarray(a_s)>96).astype(np.uint8)*255
-                    else:
-                        rgb_s=rgba.convert('RGB')
-                        a_np=(np.asarray(rgba.getchannel('A'))>0).astype(np.uint8)*255
-                    global_patches.append({
-                        'gbox':[px0,py0+y_cursor,px1,py1+y_cursor],
-                        'rgb':rgb_s,'mask':a_np,
-                        'method':pt.get('method','lama'),
-                        'bubble_id':pt.get('bubble_id',''),
-                        'quality':pt.get('quality',{}),
-                    })
-                    protected_spans.append((py0+y_cursor-2,py1+y_cursor+2))
-
-                for b in p.bubbles:
-                    reg=src_drafts.get((p.id,b.id))
-                    if reg is None:continue
-                    rb=reg.box
-                    rx0=max(0,min(nw-2,int(round(rb[0]*sx))))
-                    ry0=max(0,min(nh-2,int(round(rb[1]*sy))))
-                    rx1=max(rx0+2,min(nw,int(round(rb[2]*sx))))
-                    ry1=max(ry0+2,min(nh,int(round(rb[3]*sy))))
-                    rw_s=rx1-rx0;rh_s=ry1-ry0
-                    r_img=reg.image.resize((rw_s,rh_s),Image.Resampling.LANCZOS)
-                    r_mask=(np.asarray(Image.fromarray(reg.mask).resize((rw_s,rh_s),Image.Resampling.NEAREST))>0).astype(np.uint8)*255
-                    r_safe=(np.asarray(Image.fromarray(reg.safe).resize((rw_s,rh_s),Image.Resampling.NEAREST))>0).astype(np.uint8)*255
-                    global_drafts.append((b.id,[rx0,ry0+y_cursor,rx1,ry1+y_cursor],r_img,r_mask,r_safe,reg))
-
-                y_cursor+=nh
-                self.events.put(('progress',(idx+1)/len(loaded)*40))
-
-            total_h=y_cursor
-            self.events.put(('log',f'SmartStitch: ความสูงรวม {total_h:,} px (กว้าง {target_w} px) — กำลังหาจุดตัดหลบบับเบิ้ล…'))
-            cuts=_find_smart_cuts(
-                strips,total_h,rough_height,
-                detector_type=detector_type,sensitivity=sensitivity,
-                scan_step=scan_step,ignore_margin=ignore_margin,
-                protected_spans=protected_spans,
-            )
-            num_slices=len(cuts)-1
-            out_dir.mkdir(parents=True,exist_ok=True)
-            stamp=datetime.now().strftime('%H%M%S')
-            use_suffix=any((out_dir/f'{i+1:02d}.png').exists() for i in range(num_slices))
-
-            new_pages=[];new_drafts={};laid_count=0
-            for s_idx in range(num_slices):
-                if self.cancel.is_set():raise Cancelled()
-                cy0,cy1=cuts[s_idx],cuts[s_idx+1]
-                sh=cy1-cy0
-                fname=f'{s_idx+1:02d}_{stamp}.png' if use_suffix else f'{s_idx+1:02d}.png'
-                dest_img=out_dir/fname
-                self.events.put(('log',f'SmartStitch: บันทึกหน้าใหม่ {s_idx+1}/{num_slices} ({target_w}×{sh} px) → {fname}'))
-                slice_im=_crop_stitched_slice_rgb(strips,cy0,cy1)
-                slice_im.save(dest_img,format='PNG',compress_level=1)
-
-                page_bs_meta=[]
-                for gb,old_layer,b_sx,b_sy,b_ycur in global_bubbles:
-                    bcy=(gb.box[1]+gb.box[3])*0.5
-                    in_slice=(cy0<=bcy<cy1) or (s_idx==num_slices-1 and bcy>=cy0)
-                    if not in_slice:continue
-                    lb_copy=copy.deepcopy(gb)
-                    lb_copy.box=clip_box([gb.box[0],gb.box[1]-cy0,gb.box[2],gb.box[3]-cy0],target_w,sh)
-                    if lb_copy.quad:
-                        lb_copy.quad=[[qx,max(0.0,min(float(sh),qy-cy0))] for qx,qy in lb_copy.quad]
-                        if valid_quad(lb_copy.quad):
-                            lb_copy.box=quad_bounds(lb_copy.quad)
-                        else:
-                            lb_copy.quad=[]
-                    shifted_ls=[]
-                    for rec in lb_copy.lines:
-                        rb=rec['box']
-                        srec=dict(rec,box=clip_box([rb[0],rb[1]-cy0,rb[2],rb[3]-cy0],target_w,sh))
-                        if rec.get('quad'):
-                            srec['quad']=[[qx,max(0.0,min(float(sh),qy-cy0))] for qx,qy in rec['quad']]
-                        shifted_ls.append(srec)
-                    lb_copy.lines=shifted_ls
-                    if area(lb_copy.box)>16:
-                        page_bs_meta.append((lb_copy,old_layer,b_sx,b_sy,b_ycur-cy0))
-                page_bs_meta.sort(key=lambda item:(item[0].box[1],item[0].box[0]))
-                page_bs=[item[0] for item in page_bs_meta]
-                page_bids={b.id for b in page_bs}
-
-                page_pts=[]
-                for gp in global_patches:
-                    gx0,gy0,gx1,gy1=gp['gbox']
-                    iy0=max(cy0,gy0);iy1=min(cy1,gy1)
-                    if iy1-iy0<2:continue
-                    top_cut=iy0-gy0;bot_cut=iy1-gy0
-                    sub_rgb=gp['rgb'].crop((0,top_cut,gx1-gx0,bot_cut))
-                    sub_mask=gp['mask'][top_cut:bot_cut,:]
-                    if not np.any(sub_mask):continue
-                    local_box=[gx0,iy0-cy0,gx1,iy1-cy0]
-                    bid_ref=gp['bubble_id'] if gp['bubble_id'] in page_bids else ''
-                    prec=encode_patch(local_box,sub_rgb,sub_mask,gp['method'],bid_ref)
-                    if gp.get('quality'):prec['quality']=dict(gp['quality'])
-                    page_pts.append(prec)
-
-                p_new=Page(str(dest_img.resolve()),page_bs,'',True,uid(),page_pts)
-
-                for bid,gbox,r_img,r_mask,r_safe,orig_reg in global_drafts:
-                    if bid not in page_bids:continue
-                    gx0,gy0,gx1,gy1=gbox
-                    iy0=max(cy0,gy0);iy1=min(cy1,gy1)
-                    if iy1-iy0<8:continue
-                    tc=iy0-gy0;bc=iy1-gy0
-                    c_im=r_img.crop((0,tc,gx1-gx0,bc))
-                    new_drafts[(p_new.id,bid)]=CleanRegion(
-                        [gx0,iy0-cy0,gx1,iy1-cy0],c_im,r_mask[tc:bc,:].copy(),r_safe[tc:bc,:].copy(),
-                        orig_reg.boundary_found,orig_reg.note,orig_reg.manual_frame,orig_reg.manual_edited,
-                    )
-
-                work_slice=compose_page(slice_im,page_pts) if page_pts else slice_im
-                for b_item,old_layer,b_sx,b_sy,shift_y in page_bs_meta:
-                    if not b_item.translation.strip():continue
-                    try:
-                        if old_layer:
-                            b_item.text_layer=scale_text_layer(work_slice,b_item,old_layer,b_sx,b_sy,shift_y)
-                        else:
-                            b_item.text_layer=fast_direct_layer(
-                                work_slice,b_item,b_item.translation,
-                                font_choice=getattr(b_item,'font_choice',DEFAULT_FONT_CHOICE),
-                            )
-                        if b_item.text_layer.get('font_choice'):
-                            b_item.font_choice=b_item.text_layer['font_choice']
-                        laid_count+=1
-                    except Exception as exc:
-                        self.events.put(('log',f'ปรับ Text ({fname}): {exc}'))
-
-                new_pages.append(p_new)
-                self.events.put(('progress',40+60*(s_idx+1)/num_slices))
-
-            summary=(f'SmartStitch สำเร็จรวดเร็ว! รวมจาก {len(src_pages)} หน้า → เหลือ {len(new_pages)} หน้า '
-                     f'(กว้าง {target_w}px, สูง ~{rough_height}px) • กรอบ {sum(len(p.bubbles) for p in new_pages)} ช่อง • '
-                     f'แผ่นคลีน {sum(len(p.clean_patches) for p in new_pages)} จุด • Text {laid_count} ช่องครบ 100% (Ctrl+Z ย้อนกลับได้)')
-            self.events.put(('stitch_done',(new_pages,new_drafts,summary)))
+            self.events.put(('stitch_done',stitch_pages(src_pages,src_drafts,rough_height,width_mode,custom_width,detector_type,sensitivity,scan_step,ignore_margin,out_dir,self.cancel,self.events.put)))
             return True
 
         self.launch(work)

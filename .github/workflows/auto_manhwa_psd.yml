@@ -1,0 +1,69 @@
+name: Manhwa OCR to Photoshop
+on:
+  workflow_dispatch:
+    inputs:
+      input_path:
+        description: 'โฟลเดอร์ภาพ หรือไฟล์ .mtp / .json บนเครื่อง Runner'
+        required: true
+        type: string
+      translation_path:
+        description: 'ไฟล์คำแปล TXT (เว้นว่างได้)'
+        type: string
+      output_dir:
+        description: 'โฟลเดอร์ผลลัพธ์ (เว้นว่างเพื่อบันทึกข้างต้นทาง)'
+        type: string
+      ocr_lang:
+        description: 'ภาษา OCR'
+        type: choice
+        options: [ko+en, en, zh+en, zh_tw+en]
+      font_preset:
+        description: 'โปรไฟล์ฟอนต์'
+        type: choice
+        options: ['1. มังฮวาเกาหลี', '2. การ์ตูนต่อสู้']
+      use_smart_stitch:
+        description: 'SmartStitch 720 × 15000'
+        type: boolean
+        default: false
+      export_format:
+        description: 'รูปแบบส่งออก'
+        type: choice
+        options: [psd, mtp, png, all]
+      skip_clean:
+        description: 'ข้าม CLEAN สำหรับภาพที่คลีนแล้ว'
+        type: boolean
+        default: false
+
+permissions: {}
+concurrency:
+  group: local-rtx4060-runner
+  cancel-in-progress: false
+  queue: max
+jobs:
+  convert:
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Windows, X64, manhwa-rtx4060]
+    steps:
+      - name: Run local pipeline
+        shell: powershell
+        env:
+          SOURCE: ${{ inputs.input_path }}
+          TRANSLATION: ${{ inputs.translation_path }}
+          DESTINATION: ${{ inputs.output_dir }}
+          OCR_LANG: ${{ inputs.ocr_lang }}
+          PRESET: ${{ inputs.font_preset }}
+          STITCH: ${{ inputs.use_smart_stitch }}
+          FORMAT: ${{ inputs.export_format }}
+          SKIP_CLEAN: ${{ inputs.skip_clean }}
+        run: |
+          [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+          $env:PYTHONIOENCODING = 'utf-8'
+          $env:PYTHONUTF8 = '1'
+          $root = $env:MANHWA_APP_HOME
+          if (!$root) { $root = 'D:\ManhwaOCR' }
+          Set-Location -LiteralPath $root
+          $params = @('-X','utf8','cli_pipeline.py','--input',$env:SOURCE,'--lang',$env:OCR_LANG,'--preset',$env:PRESET,'--smart-stitch',$env:STITCH,'--skip-clean',$env:SKIP_CLEAN,'--export-format',$env:FORMAT)
+          if ($env:TRANSLATION) { $params += @('--translation',$env:TRANSLATION) }
+          if ($env:DESTINATION) { $params += @('--output-dir',$env:DESTINATION) }
+          & (Join-Path $root '.venv\Scripts\python.exe') @params
+          exit $LASTEXITCODE
+
