@@ -1,0 +1,22 @@
+[
+  {
+    "case": "gray",
+    "crop_size": [
+      467,
+      347
+    ],
+    "seconds_including_first_load": 6.531275963999633,
+    "outside_mask_identical": true,
+    "boundary_found": true
+  },
+  {
+    "case": "pink",
+    "crop_size": [
+      498,
+      328
+    ],
+    "seconds_including_first_load": 1.9607171980001112,
+    "outside_mask_identical": true,
+    "boundary_found": true
+  }
+]

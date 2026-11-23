@@ -1,0 +1,74 @@
+{
+  "attempted": 7,
+  "outputs": 7,
+  "failed": 0,
+  "passed": 1,
+  "needs_review": 6,
+  "outside_mask_identical": true,
+  "tilted_masks_inside_selection": true,
+  "regions": [
+    {
+      "index": 5,
+      "method": "solid",
+      "passes": 1,
+      "needs_review": true,
+      "ocr_remaining": 0,
+      "visual_checked": false,
+      "device": "cpu"
+    },
+    {
+      "index": 6,
+      "method": "solid",
+      "passes": 1,
+      "needs_review": true,
+      "ocr_remaining": 0,
+      "visual_checked": false,
+      "device": "cpu"
+    },
+    {
+      "index": 7,
+      "method": "solid",
+      "passes": 1,
+      "needs_review": true,
+      "ocr_remaining": 0,
+      "visual_checked": false,
+      "device": "cpu"
+    },
+    {
+      "index": 8,
+      "method": "lama",
+      "passes": 4,
+      "needs_review": true,
+      "ocr_remaining": 1,
+      "visual_checked": false,
+      "device": "cuda"
+    },
+    {
+      "index": 9,
+      "method": "lama",
+      "passes": 4,
+      "needs_review": true,
+      "ocr_remaining": 2,
+      "visual_checked": false,
+      "device": "cuda"
+    },
+    {
+      "index": 10,
+      "method": "lama",
+      "passes": 2,
+      "needs_review": true,
+      "ocr_remaining": 0,
+      "visual_checked": false,
+      "device": "cuda"
+    },
+    {
+      "index": 17,
+      "method": "solid",
+      "passes": 1,
+      "needs_review": false,
+      "ocr_remaining": 0,
+      "visual_checked": true,
+      "device": "cpu"
+    }
+  ]
+}

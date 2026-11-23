@@ -1,0 +1,466 @@
+{
+  "scope": "Real source images for all 15 bubbles on 66_2 and all 5 on 66_8, plus bubble 68 on 66_6. Not all 96 or the historical 102 bubbles.",
+  "attempted": 21,
+  "outputs": 21,
+  "failed": 0,
+  "success": 7,
+  "review": 14,
+  "methods": {
+    "solid": 13,
+    "lama": 7,
+    "gradient": 1
+  },
+  "ocr": "Installed RapidOCR English; original and enlarged detail per CLEAN; no cloud",
+  "lama": "Installed local LaMa CPU",
+  "cases": [
+    {
+      "index": 7,
+      "source_name": "66_2.PNG",
+      "method": "solid",
+      "quality": {
+        "passes": 2,
+        "remaining": [],
+        "verification_error": "",
+        "visual_checked": true,
+        "visual_residual_pixels": 0,
+        "needs_review": false,
+        "boundary_found": true
+      },
+      "font_size": 98,
+      "color": [
+        0,
+        0,
+        0
+      ],
+      "outside_mask_equal": true
+    },
+    {
+      "index": 8,
+      "source_name": "66_2.PNG",
+      "method": "solid",
+      "quality": {
+        "passes": 1,
+        "remaining": [],
+        "verification_error": "",
+        "visual_checked": true,
+        "visual_residual_pixels": 0,
+        "needs_review": true,
+        "boundary_found": false
+      },
+      "font_size": 75,
+      "color": [
+        0,
+        0,
+        0
+      ],
+      "outside_mask_equal": true
+    },
+    {
+      "index": 9,
+      "source_name": "66_2.PNG",
+      "method": "solid",
+      "quality": {
+        "passes": 1,
+        "remaining": [],
+        "verification_error": "",
+        "visual_checked": true,
+        "visual_residual_pixels": 0,
+        "needs_review": false,
+        "boundary_found": true
+      },
+      "font_size": 73,
+      "color": [
+        0,
+        0,
+        0
+      ],
+      "outside_mask_equal": true
+    },
+    {
+      "index": 10,
+      "source_name": "66_2.PNG",
+      "method": "solid",
+      "quality": {
+        "passes": 1,
+        "remaining": [],
+        "verification_error": "",
+        "visual_checked": true,
+        "visual_residual_pixels": 0,
+        "needs_review": false,
+        "boundary_found": true
+      },
+      "font_size": 56,
+      "color": [
+        0,
+        0,
+        0
+      ],
+      "outside_mask_equal": true
+    },
+    {
+      "index": 11,
+      "source_name": "66_2.PNG",
+      "method": "solid",
+      "quality": {
+        "passes": 1,
+        "remaining": [],
+        "verification_error": "",
+        "visual_checked": true,
+        "visual_residual_pixels": 0,
+        "needs_review": false,
+        "boundary_found": true
+      },
+      "font_size": 82,
+      "color": [
+        0,
+        0,
+        0
+      ],
+      "outside_mask_equal": true
+    },
+    {
+      "index": 12,
+      "source_name": "66_2.PNG",
+      "method": "solid",
+      "quality": {
+        "passes": 1,
+        "remaining": [],
+        "verification_error": "",
+        "visual_checked": true,
+        "visual_residual_pixels": 0,
+        "needs_review": false,
+        "boundary_found": true
+      },
+      "font_size": 77,
+      "color": [
+        0,
+        0,
+        0
+      ],
+      "outside_mask_equal": true
+    },
+    {
+      "index": 13,
+      "source_name": "66_2.PNG",
+      "method": "lama",
+      "quality": {
+        "passes": 1,
+        "remaining": [],
+        "verification_error": "",
+        "visual_checked": false,
+        "visual_residual_pixels": 0,
+        "needs_review": true,
+        "boundary_found": true
+      },
+      "font_size": 87,
+      "color": [
+        0,
+        0,
+        0
+      ],
+      "outside_mask_equal": true
+    },
+    {
+      "index": 14,
+      "source_name": "66_2.PNG",
+      "method": "solid",
+      "quality": {
+        "passes": 1,
+        "remaining": [],
+        "verification_error": "",
+        "visual_checked": true,
+        "visual_residual_pixels": 0,
+        "needs_review": false,
+        "boundary_found": true
+      },
+      "font_size": 85,
+      "color": [
+        0,
+        0,
+        0
+      ],
+      "outside_mask_equal": true
+    },
+    {
+      "index": 15,
+      "source_name": "66_2.PNG",
+      "method": "solid",
+      "quality": {
+        "passes": 3,
+        "remaining": [],
+        "verification_error": "",
+        "visual_checked": true,
+        "visual_residual_pixels": 0,
+        "needs_review": true,
+        "boundary_found": false
+      },
+      "font_size": 58,
+      "color": [
+        0,
+        0,
+        0
+      ],
+      "outside_mask_equal": true
+    },
+    {
+      "index": 16,
+      "source_name": "66_2.PNG",
+      "method": "solid",
+      "quality": {
+        "passes": 3,
+        "remaining": [],
+        "verification_error": "",
+        "visual_checked": true,
+        "visual_residual_pixels": 0,
+        "needs_review": true,
+        "boundary_found": false
+      },
+      "font_size": 65,
+      "color": [
+        0,
+        0,
+        0
+      ],
+      "outside_mask_equal": true
+    },
+    {
+      "index": 17,
+      "source_name": "66_2.PNG",
+      "method": "solid",
+      "quality": {
+        "passes": 1,
+        "remaining": [],
+        "verification_error": "",
+        "visual_checked": true,
+        "visual_residual_pixels": 0,
+        "needs_review": true,
+        "boundary_found": false
+      },
+      "font_size": 50,
+      "color": [
+        0,
+        0,
+        0
+      ],
+      "outside_mask_equal": true
+    },
+    {
+      "index": 18,
+      "source_name": "66_2.PNG",
+      "method": "solid",
+      "quality": {
+        "passes": 1,
+        "remaining": [],
+        "verification_error": "",
+        "visual_checked": true,
+        "visual_residual_pixels": 0,
+        "needs_review": true,
+        "boundary_found": false
+      },
+      "font_size": 62,
+      "color": [
+        0,
+        0,
+        0
+      ],
+      "outside_mask_equal": true
+    },
+    {
+      "index": 19,
+      "source_name": "66_2.PNG",
+      "method": "solid",
+      "quality": {
+        "passes": 2,
+        "remaining": [],
+        "verification_error": "",
+        "visual_checked": true,
+        "visual_residual_pixels": 0,
+        "needs_review": false,
+        "boundary_found": true
+      },
+      "font_size": 61,
+      "color": [
+        0,
+        0,
+        0
+      ],
+      "outside_mask_equal": true
+    },
+    {
+      "index": 20,
+      "source_name": "66_2.PNG",
+      "method": "solid",
+      "quality": {
+        "passes": 2,
+        "remaining": [],
+        "verification_error": "",
+        "visual_checked": true,
+        "visual_residual_pixels": 0,
+        "needs_review": true,
+        "boundary_found": false
+      },
+      "font_size": 60,
+      "color": [
+        0,
+        0,
+        0
+      ],
+      "outside_mask_equal": true
+    },
+    {
+      "index": 21,
+      "source_name": "66_2.PNG",
+      "method": "lama",
+      "quality": {
+        "passes": 1,
+        "remaining": [],
+        "verification_error": "",
+        "visual_checked": false,
+        "visual_residual_pixels": 0,
+        "needs_review": true,
+        "boundary_found": true
+      },
+      "font_size": 77,
+      "color": [
+        0,
+        0,
+        0
+      ],
+      "outside_mask_equal": true
+    },
+    {
+      "index": 68,
+      "source_name": "66_6.PNG",
+      "method": "lama",
+      "quality": {
+        "passes": 1,
+        "remaining": [],
+        "verification_error": "",
+        "visual_checked": false,
+        "visual_residual_pixels": 0,
+        "needs_review": true,
+        "boundary_found": true
+      },
+      "font_size": 53,
+      "color": [
+        255,
+        255,
+        255
+      ],
+      "outside_mask_equal": true
+    },
+    {
+      "index": 85,
+      "source_name": "66_8.PNG",
+      "method": "lama",
+      "quality": {
+        "passes": 1,
+        "remaining": [],
+        "verification_error": "",
+        "visual_checked": false,
+        "visual_residual_pixels": 0,
+        "needs_review": true,
+        "boundary_found": false
+      },
+      "font_size": 59,
+      "color": [
+        255,
+        255,
+        255
+      ],
+      "outside_mask_equal": true
+    },
+    {
+      "index": 86,
+      "source_name": "66_8.PNG",
+      "method": "lama",
+      "quality": {
+        "passes": 1,
+        "remaining": [],
+        "verification_error": "",
+        "visual_checked": false,
+        "visual_residual_pixels": 0,
+        "needs_review": true,
+        "boundary_found": false
+      },
+      "font_size": 48,
+      "color": [
+        255,
+        255,
+        255
+      ],
+      "outside_mask_equal": true
+    },
+    {
+      "index": 87,
+      "source_name": "66_8.PNG",
+      "method": "lama",
+      "quality": {
+        "passes": 1,
+        "remaining": [],
+        "verification_error": "",
+        "visual_checked": false,
+        "visual_residual_pixels": 0,
+        "needs_review": true,
+        "boundary_found": false
+      },
+      "font_size": 46,
+      "color": [
+        255,
+        255,
+        255
+      ],
+      "outside_mask_equal": true
+    },
+    {
+      "index": 88,
+      "source_name": "66_8.PNG",
+      "method": "lama",
+      "quality": {
+        "passes": 1,
+        "remaining": [],
+        "verification_error": "",
+        "visual_checked": false,
+        "visual_residual_pixels": 0,
+        "needs_review": true,
+        "boundary_found": false
+      },
+      "font_size": 48,
+      "color": [
+        255,
+        255,
+        255
+      ],
+      "outside_mask_equal": true
+    },
+    {
+      "index": 89,
+      "source_name": "66_8.PNG",
+      "method": "gradient",
+      "quality": {
+        "passes": 4,
+        "remaining": [],
+        "verification_error": "",
+        "visual_checked": true,
+        "visual_residual_pixels": 740,
+        "needs_review": true,
+        "boundary_found": false
+      },
+      "font_size": 49,
+      "color": [
+        255,
+        255,
+        255
+      ],
+      "outside_mask_equal": true
+    }
+  ],
+  "code_sha256": {
+    "bubble_cleaner.py": "9f6dd52c33c4d5e177653e4651186bf6126283ee53e4c86fb5599b3807375bea",
+    "clean_quality.py": "a504c8e006f8bb07704cedc920ef978af3b5e20582f535b1f06bf38580c46ccb",
+    "text_layout.py": "c8209d4de566288333b1ae111d5495de2b17a121813b6df0bf169ba911196ca6",
+    "photoshop_export.jsx": "dbc8651ac27a9134fe3b58b19f63ea7d6b7fa945a465b8744f28b030b9debe37"
+  },
+  "guard_refinement": "Initial safe/mask arrays compared for all 21 fixtures after final OCR-overlap guard change: no differences.",
+  "exterior_island_refinement": "Final refinement affected regions 8,15,16,17,18,20. All six reprocessed with real RapidOCR and local LaMa as needed; refreshed 66_2 PSD re-exported and verified. Other 15 region safe/mask arrays unchanged."
+}

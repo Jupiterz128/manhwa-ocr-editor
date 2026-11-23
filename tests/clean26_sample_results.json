@@ -1,0 +1,44 @@
+[
+  {
+    "box": [
+      318,
+      85,
+      539,
+      286
+    ],
+    "method": "gradient",
+    "initial_mask": 2757,
+    "final_mask": 14833,
+    "report": {
+      "passes": 4,
+      "remaining": [],
+      "verification_error": "",
+      "visual_checked": true,
+      "visual_residual_pixels": 0,
+      "needs_review": false
+    },
+    "seconds": 0.46156729999995605,
+    "outside_mask_identical": true
+  },
+  {
+    "box": [
+      80,
+      409,
+      318,
+      625
+    ],
+    "method": "gradient",
+    "initial_mask": 0,
+    "final_mask": 3354,
+    "report": {
+      "passes": 1,
+      "remaining": [],
+      "verification_error": "",
+      "visual_checked": true,
+      "visual_residual_pixels": 0,
+      "needs_review": false
+    },
+    "seconds": 0.1489884490000577,
+    "outside_mask_identical": true
+  }
+]

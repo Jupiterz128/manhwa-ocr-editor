@@ -1,0 +1,18 @@
+{
+  "date": "2026-10-14",
+  "fixture": "synthetic RGB 800 x 16000, 35 bubbles, 80 viewport positions; no OCR or CLEAN model execution",
+  "before": {
+    "mean_ms": 19.670842500005392,
+    "p95_ms": 32.442100000025675,
+    "frames": 80
+  },
+  "after": {
+    "mean_ms": 8.705687500042814,
+    "p95_ms": 17.55810000031488,
+    "frames": 80
+  },
+  "mean_speedup": 2.259539237987655,
+  "photo_constructions_before": 80,
+  "photo_constructions_after": 40,
+  "limitation": "Single sequential comparison on this PC. Not a guarantee for all pages or while other jobs run."
+}

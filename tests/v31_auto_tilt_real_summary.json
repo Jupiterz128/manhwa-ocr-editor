@@ -1,0 +1,39 @@
+{
+  "frames_checked": 6,
+  "auto_tilted": 5,
+  "engine": "EasyOCR ko+en",
+  "original_files_changed": false,
+  "cleaning_retested": false,
+  "frames": [
+    {
+      "frame": 5,
+      "angle": -11.063029163807299,
+      "auto_tilted": true
+    },
+    {
+      "frame": 6,
+      "angle": -13.612155873525985,
+      "auto_tilted": true
+    },
+    {
+      "frame": 7,
+      "angle": 0.0,
+      "auto_tilted": false
+    },
+    {
+      "frame": 8,
+      "angle": -13.29165346679025,
+      "auto_tilted": true
+    },
+    {
+      "frame": 9,
+      "angle": -13.545858059799974,
+      "auto_tilted": true
+    },
+    {
+      "frame": 10,
+      "angle": -11.93662460674981,
+      "auto_tilted": true
+    }
+  ]
+}

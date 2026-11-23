@@ -1,0 +1,497 @@
+[
+  {
+    "file_name": "66_2_v3_1.psd",
+    "scope": "full page",
+    "original_unchanged": true,
+    "only_psd_published": true,
+    "background_exact": true,
+    "clean_layers": 1,
+    "photoshop": "27.9.1",
+    "text_layers": [
+      {
+        "id": "7",
+        "font": "THSarabunNew-Bold",
+        "font_size": 98,
+        "color": "000000",
+        "bounds": [
+          520,
+          887,
+          797,
+          1092
+        ],
+        "box": [
+          504,
+          877,
+          813,
+          1102
+        ],
+        "tracking": 0,
+        "kerning": "AutoKernType.METRICS",
+        "antialias": "AntiAlias.SHARP",
+        "auto_leading": true
+      },
+      {
+        "id": "8",
+        "font": "THSarabunNew-Bold",
+        "font_size": 75,
+        "color": "000000",
+        "bounds": [
+          183,
+          2306,
+          405,
+          2428
+        ],
+        "box": [
+          170,
+          2297,
+          419,
+          2436
+        ],
+        "tracking": 0,
+        "kerning": "AutoKernType.METRICS",
+        "antialias": "AntiAlias.SHARP",
+        "auto_leading": true
+      },
+      {
+        "id": "9",
+        "font": "THSarabunNew-Bold",
+        "font_size": 73,
+        "color": "000000",
+        "bounds": [
+          295,
+          3152,
+          640,
+          3379
+        ],
+        "box": [
+          276,
+          3141,
+          659,
+          3390
+        ],
+        "tracking": 0,
+        "kerning": "AutoKernType.METRICS",
+        "antialias": "AntiAlias.SHARP",
+        "auto_leading": true
+      },
+      {
+        "id": "10",
+        "font": "THSarabunNew-Bold",
+        "font_size": 56,
+        "color": "000000",
+        "bounds": [
+          601,
+          4523,
+          708,
+          4561
+        ],
+        "box": [
+          558,
+          4503,
+          751,
+          4580
+        ],
+        "tracking": 0,
+        "kerning": "AutoKernType.METRICS",
+        "antialias": "AntiAlias.SHARP",
+        "auto_leading": true
+      },
+      {
+        "id": "11",
+        "font": "THSarabunNew-Bold",
+        "font_size": 82,
+        "color": "000000",
+        "bounds": [
+          471,
+          5922,
+          800,
+          6175
+        ],
+        "box": [
+          453,
+          5910,
+          818,
+          6187
+        ],
+        "tracking": 0,
+        "kerning": "AutoKernType.METRICS",
+        "antialias": "AntiAlias.SHARP",
+        "auto_leading": true
+      },
+      {
+        "id": "12",
+        "font": "THSarabunNew-Bold",
+        "font_size": 77,
+        "color": "000000",
+        "bounds": [
+          228,
+          7351,
+          591,
+          7588
+        ],
+        "box": [
+          208,
+          7336,
+          611,
+          7603
+        ],
+        "tracking": 0,
+        "kerning": "AutoKernType.METRICS",
+        "antialias": "AntiAlias.SHARP",
+        "auto_leading": true
+      },
+      {
+        "id": "13",
+        "font": "THSarabunNew-Bold",
+        "font_size": 87,
+        "color": "000000",
+        "bounds": [
+          366,
+          8492,
+          643,
+          8771
+        ],
+        "box": [
+          345,
+          8481,
+          664,
+          8782
+        ],
+        "tracking": 0,
+        "kerning": "AutoKernType.METRICS",
+        "antialias": "AntiAlias.SHARP",
+        "auto_leading": true
+      },
+      {
+        "id": "14",
+        "font": "THSarabunNew-Bold",
+        "font_size": 85,
+        "color": "000000",
+        "bounds": [
+          297,
+          11117,
+          594,
+          11275
+        ],
+        "box": [
+          280,
+          11107,
+          611,
+          11284
+        ],
+        "tracking": 0,
+        "kerning": "AutoKernType.METRICS",
+        "antialias": "AntiAlias.SHARP",
+        "auto_leading": true
+      },
+      {
+        "id": "15",
+        "font": "THSarabunNew-Bold",
+        "font_size": 58,
+        "color": "000000",
+        "bounds": [
+          204,
+          12479,
+          507,
+          12654
+        ],
+        "box": [
+          190,
+          12472,
+          521,
+          12661
+        ],
+        "tracking": 0,
+        "kerning": "AutoKernType.METRICS",
+        "antialias": "AntiAlias.SHARP",
+        "auto_leading": true
+      },
+      {
+        "id": "16",
+        "font": "THSarabunNew-Bold",
+        "font_size": 65,
+        "color": "000000",
+        "bounds": [
+          325,
+          12878,
+          634,
+          13093
+        ],
+        "box": [
+          309,
+          12866,
+          650,
+          13105
+        ],
+        "tracking": 0,
+        "kerning": "AutoKernType.METRICS",
+        "antialias": "AntiAlias.SHARP",
+        "auto_leading": true
+      },
+      {
+        "id": "17",
+        "font": "THSarabunNew-Bold",
+        "font_size": 50,
+        "color": "000000",
+        "bounds": [
+          371,
+          13786,
+          746,
+          13951
+        ],
+        "box": [
+          350,
+          13774,
+          767,
+          13963
+        ],
+        "tracking": 0,
+        "kerning": "AutoKernType.METRICS",
+        "antialias": "AntiAlias.SHARP",
+        "auto_leading": true
+      },
+      {
+        "id": "18",
+        "font": "THSarabunNew-Bold",
+        "font_size": 62,
+        "color": "000000",
+        "bounds": [
+          122,
+          14181,
+          534,
+          14380
+        ],
+        "box": [
+          99,
+          14174,
+          556,
+          14387
+        ],
+        "tracking": 0,
+        "kerning": "AutoKernType.METRICS",
+        "antialias": "AntiAlias.SHARP",
+        "auto_leading": true
+      },
+      {
+        "id": "19",
+        "font": "THSarabunNew-Bold",
+        "font_size": 61,
+        "color": "000000",
+        "bounds": [
+          306,
+          15731,
+          655,
+          16019
+        ],
+        "box": [
+          291,
+          15714,
+          670,
+          16037
+        ],
+        "tracking": 0,
+        "kerning": "AutoKernType.METRICS",
+        "antialias": "AntiAlias.SHARP",
+        "auto_leading": true
+      },
+      {
+        "id": "20",
+        "font": "THSarabunNew-Bold",
+        "font_size": 60,
+        "color": "000000",
+        "bounds": [
+          255,
+          17578,
+          330,
+          17619
+        ],
+        "box": [
+          183,
+          17559,
+          402,
+          17638
+        ],
+        "tracking": 0,
+        "kerning": "AutoKernType.METRICS",
+        "antialias": "AntiAlias.SHARP",
+        "auto_leading": true
+      },
+      {
+        "id": "21",
+        "font": "THSarabunNew-Bold",
+        "font_size": 77,
+        "color": "000000",
+        "bounds": [
+          348,
+          20416,
+          623,
+          20560
+        ],
+        "box": [
+          327,
+          20410,
+          644,
+          20565
+        ],
+        "tracking": 0,
+        "kerning": "AutoKernType.METRICS",
+        "antialias": "AntiAlias.SHARP",
+        "auto_leading": true
+      }
+    ]
+  },
+  {
+    "file_name": "66_8_v3_1.psd",
+    "scope": "full page",
+    "original_unchanged": true,
+    "only_psd_published": true,
+    "background_exact": true,
+    "clean_layers": 1,
+    "photoshop": "27.9.1",
+    "text_layers": [
+      {
+        "id": "85",
+        "font": "THSarabunNew-Bold",
+        "font_size": 59,
+        "color": "FFFFFF",
+        "bounds": [
+          292,
+          2253,
+          697,
+          2370
+        ],
+        "box": [
+          270,
+          2248,
+          719,
+          2375
+        ],
+        "tracking": 0,
+        "kerning": "AutoKernType.METRICS",
+        "antialias": "AntiAlias.SHARP",
+        "auto_leading": true
+      },
+      {
+        "id": "86",
+        "font": "THSarabunNew-Bold",
+        "font_size": 48,
+        "color": "FFFFFF",
+        "bounds": [
+          343,
+          10548,
+          660,
+          10647
+        ],
+        "box": [
+          273,
+          10544,
+          730,
+          10651
+        ],
+        "tracking": 0,
+        "kerning": "AutoKernType.METRICS",
+        "antialias": "AntiAlias.SHARP",
+        "auto_leading": true
+      },
+      {
+        "id": "87",
+        "font": "THSarabunNew-Bold",
+        "font_size": 46,
+        "color": "FFFFFF",
+        "bounds": [
+          297,
+          13899,
+          710,
+          13946
+        ],
+        "box": [
+          267,
+          13885,
+          740,
+          13960
+        ],
+        "tracking": 0,
+        "kerning": "AutoKernType.METRICS",
+        "antialias": "AntiAlias.SHARP",
+        "auto_leading": true
+      },
+      {
+        "id": "88",
+        "font": "THSarabunNew-Bold",
+        "font_size": 48,
+        "color": "FFFFFF",
+        "bounds": [
+          342,
+          16618,
+          645,
+          16709
+        ],
+        "box": [
+          320,
+          16614,
+          667,
+          16713
+        ],
+        "tracking": 0,
+        "kerning": "AutoKernType.METRICS",
+        "antialias": "AntiAlias.SHARP",
+        "auto_leading": true
+      },
+      {
+        "id": "89",
+        "font": "THSarabunNew-Bold",
+        "font_size": 49,
+        "color": "FFFFFF",
+        "bounds": [
+          390,
+          19121,
+          607,
+          19214
+        ],
+        "box": [
+          299,
+          19117,
+          698,
+          19218
+        ],
+        "tracking": 0,
+        "kerning": "AutoKernType.METRICS",
+        "antialias": "AntiAlias.SHARP",
+        "auto_leading": true
+      }
+    ]
+  },
+  {
+    "file_name": "66_6_frame68_v3_1.psd",
+    "scope": "single bubble crop",
+    "original_unchanged": true,
+    "only_psd_published": true,
+    "background_exact": true,
+    "clean_layers": 1,
+    "photoshop": "27.9.1",
+    "text_layers": [
+      {
+        "id": "68",
+        "font": "THSarabunNew-Bold",
+        "font_size": 53,
+        "color": "FFFFFF",
+        "bounds": [
+          147,
+          266,
+          348,
+          435
+        ],
+        "box": [
+          132,
+          259,
+          363,
+          442
+        ],
+        "tracking": 0,
+        "kerning": "AutoKernType.METRICS",
+        "antialias": "AntiAlias.SHARP",
+        "auto_leading": true
+      }
+    ]
+  }
+]

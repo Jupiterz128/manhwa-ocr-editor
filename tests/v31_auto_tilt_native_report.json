@@ -1,0 +1,73 @@
+{
+  "ok": true,
+  "photoshop": "27.9.1",
+  "text_layers": [
+    {
+      "id": "e26578f7ea85497ba25426b20e10a102",
+      "name": "TEXT 001 - e26578f7ea85497ba25426b20e10a102",
+      "text": "สวัสดีครับ\rยินดีที่ได้รู้จัก",
+      "font": "THSarabunNew-Bold",
+      "font_size": 76,
+      "auto_leading": true,
+      "color": "000000",
+      "bounds": [
+        252,
+        82,
+        508,
+        277
+      ],
+      "box": [
+        180.332260131836,
+        41.6590309143066,
+        580.309814453125,
+        317.080902099609
+      ],
+      "rotation": -18,
+      "tracking": 0,
+      "kerning": "AutoKernType.METRICS",
+      "antialias": "AntiAlias.SHARP",
+      "horizontal_scale": 100,
+      "vertical_scale": 100,
+      "baseline_shift": 0,
+      "language": "Language.ENGLISHUK",
+      "auto_leading_amount": 120.000004768372
+    },
+    {
+      "id": "ec383dfe36e74c028d499904ef4baa02",
+      "name": "TEXT 002 - ec383dfe36e74c028d499904ef4baa02",
+      "text": "สวัสดีครับ\rยินดีที่ได้รู้จัก",
+      "font": "THSarabunNew-Bold",
+      "font_size": 76,
+      "auto_leading": true,
+      "color": "FFFFFF",
+      "bounds": [
+        292,
+        401,
+        547,
+        600
+      ],
+      "box": [
+        218.335144042969,
+        355.064331054688,
+        620.372924804688,
+        645.510864257812
+      ],
+      "rotation": 21,
+      "tracking": 0,
+      "kerning": "AutoKernType.METRICS",
+      "antialias": "AntiAlias.SHARP",
+      "horizontal_scale": 100,
+      "vertical_scale": 100,
+      "baseline_shift": 0,
+      "language": "Language.ENGLISHUK",
+      "auto_leading_amount": 120.000004768372
+    }
+  ],
+  "clean_layers": 1,
+  "rotation_read_from_saved_psd": [
+    -18.000000000000004,
+    20.999999999999993
+  ],
+  "reopened_edited_and_saved": true,
+  "background_identical": true
+}

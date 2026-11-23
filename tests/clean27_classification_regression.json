@@ -1,0 +1,12 @@
+[
+  {
+    "fixture": "solid with border and halo",
+    "v2_6_method": "lama",
+    "v2_7_method": "solid"
+  },
+  {
+    "fixture": "gradient with border",
+    "v2_6_method": "lama",
+    "v2_7_method": "gradient"
+  }
+]

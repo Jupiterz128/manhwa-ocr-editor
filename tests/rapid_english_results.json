@@ -1,0 +1,156 @@
+[
+  {
+    "font": "NimbusSans-Regular.otf",
+    "expected": "UGH",
+    "actual": [
+      "UGH"
+    ],
+    "scores": [
+      0.99992
+    ],
+    "seconds": [
+      0.04324873100000559,
+      0.051326075000019955,
+      0.05441183500005309
+    ]
+  },
+  {
+    "font": "NimbusSans-Regular.otf",
+    "expected": "UGH!",
+    "actual": [
+      "UGH!"
+    ],
+    "scores": [
+      0.99983
+    ],
+    "seconds": [
+      0.05345250999999962,
+      0.04691158000002815,
+      0.05249574300000859
+    ]
+  },
+  {
+    "font": "NimbusSans-Regular.otf",
+    "expected": "LGH",
+    "actual": [
+      "LGH"
+    ],
+    "scores": [
+      0.99958
+    ],
+    "seconds": [
+      0.05408494599998903,
+      0.045377971000050366,
+      0.04628284999995458
+    ]
+  },
+  {
+    "font": "NimbusSans-Regular.otf",
+    "expected": "I am going home.",
+    "actual": [
+      "I am going",
+      "home."
+    ],
+    "scores": [
+      0.99956,
+      0.99988
+    ],
+    "seconds": [
+      0.07052360200003704,
+      0.05821899700003996,
+      0.05542379999997138
+    ]
+  },
+  {
+    "font": "NimbusSans-Regular.otf",
+    "expected": "Where are you going?",
+    "actual": [
+      "Where are you going?"
+    ],
+    "scores": [
+      0.98471
+    ],
+    "seconds": [
+      0.04918509700002005,
+      0.04987542100002429,
+      0.049919548999980634
+    ]
+  },
+  {
+    "font": "NimbusSans-BoldItalic.otf",
+    "expected": "UGH",
+    "actual": [
+      "UGH"
+    ],
+    "scores": [
+      0.99993
+    ],
+    "seconds": [
+      0.045265491000009206,
+      0.045782103000021834,
+      0.04462253900004498
+    ]
+  },
+  {
+    "font": "NimbusSans-BoldItalic.otf",
+    "expected": "UGH!",
+    "actual": [
+      "UGH!"
+    ],
+    "scores": [
+      0.99996
+    ],
+    "seconds": [
+      0.04906099500004757,
+      0.04425048699999934,
+      0.04862831999997752
+    ]
+  },
+  {
+    "font": "NimbusSans-BoldItalic.otf",
+    "expected": "LGH",
+    "actual": [
+      "LGH"
+    ],
+    "scores": [
+      0.99982
+    ],
+    "seconds": [
+      0.04959949400000596,
+      0.04989920799999936,
+      0.04778489000000263
+    ]
+  },
+  {
+    "font": "NimbusSans-BoldItalic.otf",
+    "expected": "I am going home.",
+    "actual": [
+      "I am going",
+      "home."
+    ],
+    "scores": [
+      0.99573,
+      0.99993
+    ],
+    "seconds": [
+      0.06118065499998693,
+      0.0572850539999763,
+      0.05546311099999457
+    ]
+  },
+  {
+    "font": "NimbusSans-BoldItalic.otf",
+    "expected": "Where are you going?",
+    "actual": [
+      "Where are you going?"
+    ],
+    "scores": [
+      0.99001
+    ],
+    "seconds": [
+      0.054106398999977046,
+      0.04590943599998809,
+      0.04826287299999876
+    ]
+  }
+]

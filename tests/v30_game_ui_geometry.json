@@ -1,0 +1,44 @@
+[
+  {
+    "tk_scaling": 1.333,
+    "window": [
+      1880,
+      990
+    ],
+    "image_area": [
+      982,
+      574
+    ],
+    "font": "MN Khop Khun",
+    "all_primary_buttons_visible": true,
+    "background": "#06090c"
+  },
+  {
+    "tk_scaling": 2.0,
+    "window": [
+      1880,
+      990
+    ],
+    "image_area": [
+      982,
+      574
+    ],
+    "font": "MN Khop Khun",
+    "all_primary_buttons_visible": true,
+    "background": "#06090c"
+  },
+  {
+    "tk_scaling": 2.667,
+    "window": [
+      1880,
+      990
+    ],
+    "image_area": [
+      982,
+      574
+    ],
+    "font": "MN Khop Khun",
+    "all_primary_buttons_visible": true,
+    "background": "#06090c"
+  }
+]

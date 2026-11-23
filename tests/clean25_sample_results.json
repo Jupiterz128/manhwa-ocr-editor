@@ -1,0 +1,18 @@
+[
+  {
+    "name": "purple",
+    "boundary_found": true,
+    "method": "gradient",
+    "fit_error": 1.6442941601063497,
+    "seconds": 0.09519462699972792,
+    "outside_mask_identical": true
+  },
+  {
+    "name": "gray",
+    "boundary_found": true,
+    "method": "gradient",
+    "fit_error": 1.5222474678183489,
+    "seconds": 0.11819210000021485,
+    "outside_mask_identical": true
+  }
+]

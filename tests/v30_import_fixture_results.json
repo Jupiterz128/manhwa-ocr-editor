@@ -1,0 +1,18 @@
+[
+  {
+    "input": "1.txt",
+    "case": "unchanged TXT against matching fixture IDs (project unavailable)",
+    "translations": 84,
+    "notices": 0,
+    "translation_content_preserved": true,
+    "input_file_unchanged": true
+  },
+  {
+    "input": "2_fixed.txt",
+    "case": "reconstructed original three errors from corrected TXT (original TXT/project unavailable)",
+    "translations": 97,
+    "notices": 3,
+    "translation_content_preserved": true,
+    "input_file_unchanged": true
+  }
+]

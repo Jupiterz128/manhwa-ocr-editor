@@ -1,0 +1,48 @@
+{
+  "torch": "2.6.0+cu124",
+  "gpu": "NVIDIA GeForce RTX 4060",
+  "times_seconds": {
+    "cpu": [
+      0.5490386999999828,
+      0.6297810999999456,
+      0.30139489999987745
+    ],
+    "cuda": [
+      0.04010870000001887,
+      0.11878690000003189,
+      0.14043589999982942
+    ]
+  },
+  "regions": [
+    {
+      "size": [
+        343,
+        261
+      ],
+      "speedup": 13.688768272213371,
+      "mean_rgb_difference": 0.055473856209150324,
+      "max_rgb_difference": 1.0,
+      "outside_mask_identical": true
+    },
+    {
+      "size": [
+        375,
+        285
+      ],
+      "speedup": 5.301772333479335,
+      "mean_rgb_difference": 0.11493973954541778,
+      "max_rgb_difference": 3.0,
+      "outside_mask_identical": true
+    },
+    {
+      "size": [
+        259,
+        197
+      ],
+      "speedup": 2.1461385585896737,
+      "mean_rgb_difference": 0.12807982081042557,
+      "max_rgb_difference": 2.0,
+      "outside_mask_identical": true
+    }
+  ]
+}
