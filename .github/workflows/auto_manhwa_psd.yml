@@ -37,6 +37,7 @@ permissions: {}
 concurrency:
   group: local-rtx4060-runner
   cancel-in-progress: false
+  queue: max
 jobs:
   convert:
     if: github.ref == 'refs/heads/main'

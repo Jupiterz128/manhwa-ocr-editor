@@ -920,7 +920,7 @@ def _merge_tile_regions(tile,det,typed):
 class LocalPipeline:
     def __init__(self, cache, mode='auto', lang='ko+en', gpu=False,
                  neural=True, retry=False, log=lambda s: None, cancel=None,
-                 fast=True, bubble_only=True, type_scan=False):
+                 fast=True, bubble_only=True, type_scan=False, prefer_rapid=False):
         self.type_scan=type_scan
         self.cache, self.log = cache, log
         self.cancel = cancel or threading.Event()
@@ -935,7 +935,7 @@ class LocalPipeline:
         choices = [('paddle', PaddleEngine), ('easy', EasyEngine)]
         if lang == 'ko+en':
             choices.reverse()
-        if mode == 'auto' and 'unittest' not in sys.modules:
+        if mode == 'auto' and (prefer_rapid or 'unittest' not in sys.modules):
             choices = [('rapid', RapidEngine)] + choices
         elif mode == 'rapid':
             choices = [('rapid', RapidEngine)]

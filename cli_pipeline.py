@@ -28,17 +28,13 @@ def options():
     p.add_argument('--translation', type=Path)
     p.add_argument('--output-dir', type=Path)
     p.add_argument('--lang', choices=['ko+en','en','zh+en','zh_tw+en'], default='ko+en')
-    p.add_argument('--preset', choices=list(app_presets()), default='1. มังฮวาเกาหลี')
+    p.add_argument('--preset', choices=list(load_font_presets()), default='1. มังฮวาเกาหลี')
     p.add_argument('--smart-stitch', type=boolean, default=False)
     p.add_argument('--stitch-height', type=int, default=15000)
     p.add_argument('--stitch-width', type=int, default=720)
     p.add_argument('--skip-clean', type=boolean, default=False)
     p.add_argument('--export-format', choices=['psd','mtp','png','all'], default='psd')
     return p.parse_args()
-
-
-def app_presets():
-    return load_font_presets()
 
 
 def emit(event):
@@ -83,7 +79,7 @@ def run(args):
         nonlocal pipeline
         if pipeline is None:
             pipeline = app.LocalPipeline(app.OCRCache(), mode='auto', lang=args.lang, gpu=gpu,
-                                         neural=for_detection, type_scan=for_detection, log=print)
+                                         neural=for_detection, type_scan=for_detection, prefer_rapid=True, log=print)
         return pipeline
 
     try:
@@ -119,7 +115,7 @@ def run(args):
                     if b.id in report['frame_tags']:
                         b.frame_type=report['frame_tags'][b.id]
                         b.frame_type_locked=True
-        fonts = app_presets()[args.preset]
+        fonts = load_font_presets()[args.preset]
         cleaner = Cleaner()
         for i,page in enumerate(pages,1):
             raw = app.load_image(page.path)
