@@ -249,6 +249,9 @@ def export_psd(image,page,destination,include_text=True,cancel=None):
     if destination.exists():raise FileExistsError(destination)
     if max(image.size)>30000:raise ValueError('PSD รองรับด้านละไม่เกิน 30,000 px กรุณาแบ่งหน้ายาวก่อนส่งออก')
     if cancel is not None and cancel.is_set():raise InterruptedError('หยุดส่งออกแล้ว')
+    if backend == "photopea":
+    from photopea_export import export_psd_photopea
+    return export_psd_photopea(image, page, destination, include_text=include_text, cancel=cancel)
     photoshop_progid()
     destination.parent.mkdir(parents=True,exist_ok=True)
     temp_root=_ascii_temp_root(destination.parent)
