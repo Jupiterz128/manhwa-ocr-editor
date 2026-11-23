@@ -38,6 +38,7 @@ def options():
     p.add_argument('--stitch-width', type=int, default=720)
     p.add_argument('--skip-clean', type=boolean, default=False)
     p.add_argument('--export-format', choices=['psd','mtp','png','all'], default='psd')
+    p.add_argument('--psd-backend', choices=['photoshop','photopea'], default='photoshop')
     args=p.parse_args()
     if bool(args.drive_link)!=bool(args.input_mode):
         p.error('--drive-link and --input-mode must be used together')
@@ -230,7 +231,7 @@ def run(args):
             if args.export_format in ('png','all'):
                 composite_text_crop(compose_page(image,page.clean_patches),page.bubbles,(0,0)).save(output/f'{i:02}.png')
             if args.export_format in ('psd','all'):
-                report=export_psd(image,page,output/f'{i:02}.psd')
+            report=export_psd(image,page,output/f'{i:02}.psd',backend=args.psd_backend)
                 for warning in report.get('warnings',[]):print(warning,flush=True)
             print(f'Export pages {100*i/len(pages):.0f}%',flush=True)
         if args.drive_link and not stats['failures']:
