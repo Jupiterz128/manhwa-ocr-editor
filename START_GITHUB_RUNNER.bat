@@ -1,5 +1,8 @@
 @echo off
 setlocal
+rem Work around actions/runner#4686 on th-TH Windows hosts.
+set "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1"
+set "DOTNET_SYSTEM_GLOBALIZATION_PREDEFINEDCULTURESONLY=false"
 cd /d "%~dp0"
 set "MANHWA_APP_HOME=%CD%"
 if not defined MANHWA_RUNNER_HOME set "MANHWA_RUNNER_HOME=D:\GitHubRunner"
