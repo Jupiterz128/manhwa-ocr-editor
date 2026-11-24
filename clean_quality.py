@@ -80,6 +80,7 @@ def clean_checked(cleaner,region,method='auto',color=None,cancel=None,reader=Non
     mask in a single pass without re-adding erased areas via OCR or residual checks.
     """
     work=copy.deepcopy(region)
+    limit=work.safe if work.auto_limit is None or work.manual_edited else work.auto_limit
     locked=bool(getattr(region,'manual_edited',False))
     report={'passes':0,'remaining':[],'verification_error':'','visual_checked':False,
             'visual_residual_pixels':0,'needs_review':True,'manual_locked':locked}
@@ -112,6 +113,7 @@ def clean_checked(cleaner,region,method='auto',color=None,cancel=None,reader=Non
         else:out,used,chosen=work.image.copy(),work.mask.copy(),'no-change'
         report['passes']=attempt+1
         extra,assessed=residual_mask(out,work,used)
+        extra=cv2.bitwise_and(extra,limit)
         report['visual_checked']=assessed
         report['visual_residual_pixels']=int(np.count_nonzero(extra))
         remaining=[]
@@ -130,7 +132,7 @@ def clean_checked(cleaner,region,method='auto',color=None,cancel=None,reader=Non
                             # Do not expand masks for punctuation hallucinated on
                             # uniform interior pixels or triggered by the outer border.
                             if len(pixels) and np.max(np.ptp(pixels.astype(np.int16),axis=0))<=4:continue
-                        if 0<=y<used.shape[0] and 0<=x<used.shape[1] and work.safe[y,x]:remaining.append(line)
+                        if 0<=y<used.shape[0] and 0<=x<used.shape[1] and limit[y,x]:remaining.append(line)
                     report['verification_error']=''
                     if not remaining:ocr_verified_clean=True
                 except Exception as exc:
@@ -158,7 +160,7 @@ def clean_checked(cleaner,region,method='auto',color=None,cancel=None,reader=Non
             else:
                 expanded=cv2.bitwise_or(expanded,rem_mask)
                 expanded=cv2.dilate(expanded,np.ones((7,7),np.uint8))
-        expanded=cv2.bitwise_and(expanded,work.safe)
+        expanded=cv2.bitwise_and(expanded,limit)
         if np.array_equal(expanded,used):break
         work.mask=expanded
     if cancel and cancel.is_set():raise InterruptedError('หยุดคลีนแล้ว')

@@ -27,7 +27,7 @@ import uvicorn
 import manhwa_ocr as core
 from sound_effects import SoundEffects
 sounds=SoundEffects()
-from bubble_cleaner import Cleaner, compose_page, prepare_region, encode_region, decode_region, encode_patch
+from bubble_cleaner import auto_region, Cleaner, compose_page, prepare_region, encode_region, decode_region, encode_patch
 from clean_quality import clean_checked, quality_note
 from text_layout import (
     DEFAULT_FONT_PRESETS,
@@ -706,7 +706,9 @@ def image(key: str, n: int, view: str = 'original', bid: str = ''):
         im = compose_page(im, page.clean_patches)
     elif view == 'mask':
         for b in page.bubbles:
-            reg = decode_region(masks[b.id]) if b.id in masks else prepare_region(im, b)
+            reg = decode_region(masks[b.id]) if b.id in masks else auto_region(im, b)
+            if reg is None:
+                continue
             im.paste((109, 85, 240), reg.box, Image.fromarray((reg.mask * 0.55).astype('uint8')))
     elif view in ('mask_base','mask_alpha','mask_draft') and bid:
         other = [pt for pt in page.clean_patches if pt.get('bubble_id') != bid]
@@ -1147,7 +1149,10 @@ def batch_action(key: str, action: str, d: dict):
                     if not d.get('reset') and b.id in masks and masks[b.id].get('manual_edited'):
                         total += 1
                         continue
-                    reg = prepare_region(im, b)
+                    reg = auto_region(im, b)
+                    if reg is None:
+                        masks.pop(b.id,None)
+                        continue
                     masks[b.id] = encode_region(reg)
                     total += 1
             note = f'สร้าง Mask ทุกหน้าสำเร็จ {len(pages)} หน้า • {total} กรอบ'
@@ -1160,7 +1165,9 @@ def batch_action(key: str, action: str, d: dict):
                     continue
                 im = core.load_image(p.path)
                 for item in p.bubbles:
-                    reg = decode_region(masks[item.id]) if item.id in masks else prepare_region(im, item)
+                    reg = decode_region(masks[item.id]) if masks.get(item.id, {}).get('manual_edited') else auto_region(im,item)
+                    if reg is None:
+                        continue
                     repaired, mask, method, quality = clean_checked(
                         cleaner, reg, cancel=cancel, reader=_make_verifier(reg)
                     )
@@ -1208,6 +1215,26 @@ def action(key: str, n: int, action: str, d: dict):
             if 'bubble_box' in d:
                 masks.pop(b.id, None)
                 masks.pop('undo:' + b.id, None)
+        elif action == 'page_font':
+            previous = {item.id: [item.font_choice, item.text_layer.get('manual_font')] for item in p.bubbles}
+            applied = {}
+            for item in p.bubbles:
+                requested = d.get('fonts', {}).get(item.id) if 'fonts' in d else [d['font'], True]
+                if requested is None:
+                    continue
+                font, manual = requested
+                info = resolve_font(normalize_font_choice(font))
+                item.font_choice = info.choice
+                if item.text_layer:
+                    item.text_layer.update(font=info.postscript, font_choice=info.choice)
+                if item.text_layer:
+                    if manual is None:
+                        item.text_layer.pop('manual_font', None)
+                    else:
+                        item.text_layer['manual_font'] = manual
+                applied[item.id] = [item.font_choice, manual]
+            extra_out.update(previous=previous, applied=applied)
+            note = f"เปลี่ยนฟอนต์ทั้งหน้า ({len(applied)} บอลลูน) {d.get('font', '')} เรียบร้อย"
         elif action == 'add_bubble':
             box = _clip_bubble_box(d.get('box'), im)
             default_font, _ = resolve_preset_font(active_preset, 'normal')
@@ -1349,7 +1376,9 @@ def action(key: str, n: int, action: str, d: dict):
             cleaner = get_cleaner()
             review = 0
             for item in targets:
-                reg = decode_region(masks[item.id]) if item.id in masks else prepare_region(im, item)
+                reg = decode_region(masks[item.id]) if masks.get(item.id, {}).get('manual_edited') else auto_region(im,item)
+                if reg is None:
+                    continue
                 repaired, mask, method, quality = clean_checked(
                     cleaner, reg, cancel=cancel, reader=_make_verifier(reg)
                 )

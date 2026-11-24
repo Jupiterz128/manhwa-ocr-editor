@@ -9,7 +9,7 @@ import threading
 
 from PIL import Image
 import manhwa_ocr as app
-from bubble_cleaner import Cleaner, compose_page, encode_patch, encode_region, prepare_region
+from bubble_cleaner import auto_region, Cleaner, compose_page, encode_patch, encode_region
 from clean_quality import clean_checked
 from gemini_translator import DEFAULT_GEMINI_MODEL, translate_pages_with_gemini
 from photoshop_export import DEFAULT_PSD_BACKEND, PhotopeaSession, export_psd as _real_export_psd
@@ -194,7 +194,9 @@ def run(args):
             for page in pages:
                 raw=app.load_image(page.path)
                 for b in page.bubbles:
-                    drafts[(page.id,b.id)]=prepare_region(raw,b)
+                    region = auto_region(raw,b)
+                    if region is not None:
+                        drafts[(page.id,b.id)] = region
         if args.translation:
             changes,report = detect_and_parse_translations(args.translation.read_text('utf-8-sig'),pages)
             print(f"Translations: {report['matched_count']}/{report['total_bubbles']}", *report['warnings'],flush=True)
@@ -220,25 +222,26 @@ def run(args):
                     stats['existing']+=1
                 elif not args.skip_clean:
                     try:
-                        region = drafts.get(key) or prepare_region(work,b)
-                        drafts[key] = region
-                        def verify(result):
-                            pipe=reader()
-                            engine=next(pipe.iter_engines())
-                            lines=pipe.read(engine,result,'cli-clean-verify')
-                            return [dict(box=[l.box[0]+region.box[0],l.box[1]+region.box[1],
-                                              l.box[2]+region.box[0],l.box[3]+region.box[1]],text=l.text) for l in lines]
-                        repaired,mask,method,quality=clean_checked(cleaner,region,cancel=cancel,reader=verify)
-                        patch=encode_patch(region.box,repaired,mask,method,b.id)
-                        patch['quality']=quality
-                        page.clean_patches.append(patch)
-                        work.paste(repaired,region.box[:2],Image.fromarray(mask))
-                        if quality['needs_review']:
-                            region.mask=mask
-                            stats['review']+=1
-                        else:
-                            drafts.pop(key,None)
-                            stats['verified']+=1
+                        region = auto_region(work,b,drafts.get(key))
+                        if region is not None:
+                            drafts[key] = region
+                            def verify(result):
+                                pipe=reader()
+                                engine=next(pipe.iter_engines())
+                                lines=pipe.read(engine,result,'cli-clean-verify')
+                                return [dict(box=[l.box[0]+region.box[0],l.box[1]+region.box[1],
+                                                  l.box[2]+region.box[0],l.box[3]+region.box[1]],text=l.text) for l in lines]
+                            repaired,mask,method,quality=clean_checked(cleaner,region,cancel=cancel,reader=verify)
+                            patch=encode_patch(region.box,repaired,mask,method,b.id)
+                            patch['quality']=quality
+                            page.clean_patches.append(patch)
+                            work.paste(repaired,region.box[:2],Image.fromarray(mask))
+                            if quality['needs_review']:
+                                region.mask=mask
+                                stats['review']+=1
+                            else:
+                                drafts.pop(key,None)
+                                stats['verified']+=1
                     except Exception as exc:
                         stats['failures'].append(dict(page=i,bubble=b.id,error=str(exc)))
                         print(f'CLEAN failed: {i}/{b.id}: {exc}',flush=True)

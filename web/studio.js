@@ -277,6 +277,10 @@ function pushTransformHistory(before,after,label='การปรับตำแ
 async function applyTransformSnap(snap,toastMsg){
  if(!snap||!page())return;
  await flush();
+ if(snap.fonts){
+  const res=await api(key+'/page/'+n+'/page_font',{fonts:snap.fonts});
+  pages[n]=res.page;revision++;image();inspect();sidebar();draw();info(toastMsg);return
+ }
  const target=page().bubbles.find(b=>b.id===snap.id);
  if(!target)return;
  id=target.id;
@@ -366,7 +370,7 @@ function draw(){
   });
   let s=l.stroke,g=l.gradient;
   if(textMode&&s?.enabled){label.style.webkitTextStroke=2*s.size*zoom+'px '+rgb(s.color);label.style.paintOrder='stroke fill'}
-  if(textMode&&g?.enabled){label.style.backgroundImage='linear-gradient('+(g.angle===90?'to top':'to right')+','+rgb(g.start_color)+','+rgb(g.end_color)+')';label.style.backgroundClip='text';label.style.webkitTextFillColor='transparent'}
+  if(textMode&&g?.enabled){label.style.backgroundImage='linear-gradient('+((g.angle===135?135:90-g.angle)+'deg')+','+rgb(g.start_color)+','+rgb(g.end_color)+')';label.style.backgroundClip='text';label.style.webkitTextFillColor='transparent'}
   div.append(label);
   // Show corner status badge only in ต้นฉบับ / คลีน views — keep Text view completely unobstructed!
   if(!showText){
@@ -402,9 +406,20 @@ function inspect(){
  fillSelect($('frame'),FRAME_OPTIONS,ft);
  fillSelect($('font'),fonts,b.font_choice);$('source').value=b.text;$('thai').value=b.translation;$('ink').value=rgb(l.color);$('rotation').value=l.rotation||0;$('align').value=l.alignment||'center';$('size').value=l.font_size||24;$('sizeValue').value=$('size').value;
  updateCoordInfo();
- $('stroke').checked=!!s.enabled;$('edge').value=rgb(s.color);$('width').value=s.size||3;$('gradient').checked=!!g.enabled;$('start').value=rgb(g.start_color||[255,255,255]);$('end').value=rgb(g.end_color||[200,200,200]);$('angle').value=g.angle??90;
+ $('stroke').checked=!!s.enabled;$('edge').value=rgb(s.color||[255,255,255]);$('width').value=s.size||3;$('gradient').checked=!!g.enabled;$('start').value=rgb(g.start_color||[255,255,255]);$('end').value=rgb(g.end_color||[200,200,200]);$('angle').value=g.angle??90;
  $('thai').oninput=()=>{b.translation=$('thai').value;l.text=b.translation;queueEdit({translation:b.translation});sidebar();draw()};
  $('source').oninput=()=>{b.text=$('source').value;queueEdit({text:b.text});sidebar()};
+ $('pageFont').onclick=()=>run(async()=>{
+  const font=$('font').value;
+  await flush();
+  const result=await api(key+'/page/'+n+'/page_font',{font});
+  const h=pageHistory();
+  h.undo.push({before:{fonts:result.previous},after:{fonts:result.applied},label:'เปลี่ยนฟอนต์ทั้งหน้า'});
+  if(h.undo.length>60)h.undo.shift();
+  lastArrowPush={time:0,id:''};
+  h.redo.length=0;
+  pages[n]=result.page;revision++;image();inspect();sidebar();draw();info(result.note)
+ });
  $('font').onchange=()=>{b.font_choice=$('font').value;if(b.text_layer)b.text_layer.font_choice=b.font_choice;queueEdit({font_choice:b.font_choice});run(flush);draw()};
  $('frame').onchange=()=>run(async()=>{
   const ft=$('frame').value, activeP=$('presetSelect')?.value||selectedPreset;

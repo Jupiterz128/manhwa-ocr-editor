@@ -154,7 +154,7 @@ class GeminiSinglePassTranslatorTests(unittest.TestCase):
 
         def scan(_):
             calls.append('scan')
-            return [cli.app.Bubble([20, 20, 200, 140], text='Hello!', id='bub1', detected_frame_type='normal')]
+            return [cli.app.Bubble([20, 20, 200, 140], text='Hello!', score=.95, lines=[{'text':'Hello!', 'box':[44,40,118,68]}], id='bub1', detected_frame_type='normal')]
 
         def fake_translate(pages, **kw):
             calls.append('gemini')

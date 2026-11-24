@@ -13,7 +13,7 @@ def styled_fixture():
     im,b=test_text30.LayoutTests().fixture()
     b.text_layer=layout_text(im,b)
     b.text_layer.update(stroke=dict(enabled=True,color=[30,50,100],size=3),
-                        gradient=dict(enabled=True,start_color=[255,20,0],end_color=[0,200,255],angle=90),
+                        gradient=dict(enabled=True,start_color=[255,20,0],end_color=[0,200,255],angle=45),
                         manual_effects=True)
     return im,b
 
@@ -48,6 +48,6 @@ class RoundTripTests(unittest.TestCase):
             fx=layer.tagged_blocks.get_data(b'lfx2')
             self.assertEqual(float(fx[b'FrFX'][b'Sz  ']),3)
             grad=fx[b'GrFl']
-            self.assertEqual(float(grad[b'Angl']),90)
+            self.assertEqual(float(grad[b'Angl']),45)
             self.assertEqual([int(s[b'Lctn']) for s in grad[b'Grad'][b'Clrs']],[0,4096])
 

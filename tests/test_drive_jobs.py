@@ -31,7 +31,7 @@ class DriveJobs(unittest.TestCase):
             return txt,txt.name
         def scan(_):
             calls.append('scan')
-            return [cli.app.Bubble([30,30,150,110],text='Hello',detected_frame_type='normal')]
+            return [cli.app.Bubble([30,30,150,110],text='Hello',score=.9,detected_frame_type='normal')]
         with tempfile.TemporaryDirectory() as root, ExitStack() as stack:
             for obj,name,kw in [
                 (drive,'ROOT',dict(new=Path(root))),

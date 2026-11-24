@@ -97,6 +97,7 @@ class CleanRegion:
     note: str = ''
     manual_frame: bool = False
     manual_edited: bool = False
+    auto_limit: np.ndarray | None = None
 
 
 def bounded_box(box, size, pad=0):
@@ -338,6 +339,67 @@ def _stroke_hugging_mask(arr, gray, safe, bubble_local_box, line_shapes, support
         if s_px>0 and np.count_nonzero((hugged>0)&(shape>0))<s_px*.10:
             hugged=cv2.bitwise_or(hugged,cv2.dilate(shape,fallback_el))
     return cv2.bitwise_and(hugged,safe)
+
+
+def auto_region(image, bubble, cached=None):
+    """Build an OCR-backed mask, keeping verification retries inside the same safe zone."""
+    import copy
+    if cached is not None and cached.manual_edited:
+        return cached
+    if not any(c.isalnum() for c in bubble.text or '') or not bubble.score > 0:
+        return None
+    x,y,r,b = bounded_box(bubble.box, image.size)
+    if r <= x or b <= y:
+        return None
+    lines = []
+    for rec in bubble.lines:
+        if not rec.get('box') or not any(c.isalnum() for c in rec.get('text',bubble.text)):
+            continue
+        l,t,rr,bb = bounded_box(rec['box'],image.size)
+        clipped = [max(x,l),max(y,t),min(r,rr),min(b,bb)]
+        if clipped[2]>clipped[0] and clipped[3]>clipped[1]:
+            lines.append(dict(rec,box=clipped))
+    large = (r-x) > .6*image.width and (b-y) > .35*image.height
+    if large and not lines:
+        return None
+    target = copy.copy(bubble)
+    target.lines = lines
+    if lines:
+        boxes = [rec['box'] for rec in lines]
+        area = sum((rr-l)*(bb-t) for l,t,rr,bb in boxes)
+        if large or (r-x)*(b-y)>7*area:
+            if large and any((rr-l)>.6*image.width and (bb-t)>.35*image.height for l,t,rr,bb in boxes):
+                return None
+            target.box = bounded_box([min(v[0] for v in boxes), min(v[1] for v in boxes),
+                                      max(v[2] for v in boxes), max(v[3] for v in boxes)],image.size,8)
+            target.quad = []
+    if cached is not None and cached.auto_limit is not None:
+        return cached
+    region = prepare_region(image,target,margin=6)
+    safe = region.safe
+    ox,oy = region.box[:2]
+    support = safe.copy()
+    if lines:
+        support.fill(0)
+        for rec in lines:
+            l,t,rr,bb = rec['box']
+            _rect(support,[l-ox,t-oy,rr-ox,bb-oy],pad=8)
+    gray = np.asarray(region.image.convert('L'))
+    count, labels, stats, _ = cv2.connectedComponentsWithStats((gray<90).astype(np.uint8))
+    protected = np.zeros(count, dtype=np.uint8)
+    for i in range(1,count):
+        l,t,w,h,pixels = stats[i]
+        if w < 0.45*(r-x) and h < 0.45*(b-y):
+            continue
+        touches = l+ox<=x+2 or t+oy<=y+2 or l+w+ox>=r-2 or t+h+oy>=b-2
+        ring = w>.6*(r-x) and h>.6*(b-y) and pixels<.35*w*h
+        if (touches or ring) and pixels < .55*w*h:
+            protected[i] = 255
+    walls = cv2.dilate(protected[labels], cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(11,11)))
+    safe[walls>0] = 0
+    region.auto_limit = safe & support
+    region.mask &= region.auto_limit
+    return region
 
 
 def prepare_region(image, bubble, margin=6, grow=6, coverage=True):

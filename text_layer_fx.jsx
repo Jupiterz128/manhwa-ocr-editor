@@ -50,7 +50,8 @@ function applyTextFX(doc, layer, data, photopea) {
         off.putUnitDouble(c("Hrzn"), c("#Prc"), 0);
         off.putUnitDouble(c("Vrtc"), c("#Prc"), 0);
         g.putObject(c("Ofst"), c("Pnt "), off);
-        g.putBoolean(c("Rvrs"), false);
+        // The inspector labels 135 degrees from upper left to lower right.
+        g.putBoolean(c("Rvrs"), grad.angle === 135);
         g.putBoolean(c("Dthr"), false);
         g.putBoolean(c("Algn"), true);
         g.putUnitDouble(c("Scl "), c("#Prc"), 100);

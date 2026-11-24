@@ -47,7 +47,7 @@ class GUITests(unittest.TestCase):
 
     def test_rebuild_uses_original_and_repair_replaces_old_patch_with_undo(self):
         from bubble_cleaner import encode_patch
-        a=self.app;p=a.page();b=m.Bubble([80,70,640,350],lines=[{'box':[165,155,555,210]}])
+        a=self.app;p=a.page();b=m.Bubble([80,70,640,350],text='Hello',score=.5,lines=[{'box':[165,155,555,210]}])
         p.bubbles=[b];a.refresh_tree()
         bad=encode_patch([80,70,640,350],Image.new('RGB',(560,280),'blue'),np.full((280,560),255,np.uint8),'gradient',b.id)
         p.clean_patches=[bad]
@@ -76,7 +76,7 @@ class GUITests(unittest.TestCase):
         self.play_sound.assert_not_called()
 
     def test_masks_and_clean_all_play_matching_sound_but_single_page_is_silent(self):
-        a=self.app;b=m.Bubble([80,70,640,350],lines=[{'box':[165,155,555,210]}])
+        a=self.app;b=m.Bubble([80,70,640,350],text='Hello',score=.9,lines=[{'box':[165,155,555,210]}])
         a.page().bubbles=[b];a.refresh_tree()
         with patch.object(a,'cleaning_lines',return_value=[]):
             a.prepare_clean_masks();self.pump(lambda:a.busy)
@@ -502,7 +502,7 @@ class GUITests(unittest.TestCase):
 
     def test_batch_stages_then_cleans_all_selected_even_uncertain(self):
         a=self.app;original_page=a.page()
-        first=m.Bubble([80,70,640,350],score=.01,lines=[{'box':[165,155,555,210]}])
+        first=m.Bubble([80,70,640,350],text="Hello",score=.01,lines=[{'box':[165,155,555,210]}])
         second=m.Bubble([100,550,650,850],text='No coordinates',score=.01)
         third=m.Bubble([0,1000,100,1100],text='Not selected')
         original_page.bubbles=[first,second,third];a.refresh_tree();self.root.update()
@@ -570,7 +570,7 @@ class GUITests(unittest.TestCase):
     def test_batch_mixed_failures_have_distinct_reasons_and_continue(self):
         import numpy as np
         a=self.app
-        a.page().bubbles=[m.Bubble([80,70,640,350],score=.01) for _ in range(4)]
+        a.page().bubbles=[m.Bubble([80,70,640,350],text="Hello",score=.01) for _ in range(4)]
         for b in a.page().bubbles:
             a.clean_prepared[(a.page().id,b.id)]=m.prepare_region(a.image,b)
         a.refresh_tree();calls=[]
@@ -594,7 +594,7 @@ class GUITests(unittest.TestCase):
         self.assertTrue((folder/'region-0001.json').is_file())
 
     def test_batch_cancel_keeps_mask_and_reports_unattempted(self):
-        a=self.app;a.page().bubbles=[m.Bubble([80,70,640,350]) for _ in range(3)]
+        a=self.app;a.page().bubbles=[m.Bubble([80,70,640,350],text="Hello",score=.95) for _ in range(3)]
         for b in a.page().bubbles:a.clean_prepared[(a.page().id,b.id)]=m.prepare_region(a.image,b)
         a.refresh_tree()
         with patch('clean_quality.clean_checked',side_effect=InterruptedError('cancelled inside cleaner')):

@@ -5,7 +5,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 DEFAULTS = {
-    'stroke': {'enabled': False, 'color': [0, 0, 0], 'size': 3},
+    'stroke': {'enabled': False, 'color': [255, 255, 255], 'size': 3},
     'gradient': {'enabled': False, 'start_color': [255, 255, 255],
                  'end_color': [200, 200, 200], 'angle': 90},
 }
@@ -26,7 +26,7 @@ def effects(layer=None):
                     default[field] = list(v)
             elif field == 'size' and type(v) is int:
                 default[field] = max(1, min(8, v))
-            elif field == 'angle' and v in (0, 90):
+            elif field == 'angle' and v in (0, 45, 90, 135):
                 default[field] = int(v)
     return style
 
@@ -104,8 +104,8 @@ def sample_style(orig, cleaned, bubble, *, include_color=False):
         style['color']=np.median(rgb[core],axis=0).round().astype(int).tolist()
     if core.sum()<24:return style
     ys,xs=np.nonzero(core)
-    strongest=22
-    for coords,angle in ((ys,90),(xs,0)):
+    strongest=18
+    for coords,angle in ((-ys,90),(xs,0),(xs-ys,45),(xs+ys,135)):
         span=np.ptp(coords)
         if span<6:continue
         groups=np.minimum(2,3*(coords-coords.min())//(span+1))
@@ -124,7 +124,6 @@ def sample_style(orig, cleaned, bubble, *, include_color=False):
         residual=colors-(colors.mean(axis=0)+(pos-pos.mean())[:,None]*slope)
         if np.percentile(np.linalg.norm(residual,axis=1),85)>max(5,length*.15):continue
         ends=[np.median(rgb[core][v],axis=0).astype(int).tolist() for v in (pos<=.10,pos>=.90)]
-        if angle==90:ends.reverse()  # Photoshop 90 degrees runs bottom to top.
         style['gradient'].update(enabled=True,start_color=ends[0],end_color=ends[1],angle=angle)
         strongest=length
     return style
@@ -135,7 +134,12 @@ def styled_tile(tile, layer):
     stroke,grad=style['stroke'],style['gradient']
     if grad['enabled']:
         w,h=tile.size
-        t=np.linspace(0,1,w)[None,:,None] if grad['angle']==0 else np.linspace(1,0,h)[:,None,None]
+        angle=np.deg2rad(grad['angle'])
+        y,x=np.ogrid[:h,:w]
+        axis=x*np.cos(angle)-y*np.sin(angle)
+        t=((axis-axis.min())/max(1,np.ptp(axis)))[:,:,None]
+        if grad['angle']==135:
+            t=1-t
         colors=(1-t)*np.array(grad['start_color'])+t*np.array(grad['end_color'])
         fill=Image.fromarray(np.broadcast_to(colors,(h,w,3)).round().astype('uint8'))
         fill.putalpha(tile.getchannel('A'))

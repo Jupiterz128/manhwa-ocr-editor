@@ -29,7 +29,7 @@ from tkinter import ttk, filedialog, messagebox, scrolledtext, simpledialog
 
 import numpy as np
 from PIL import Image, ImageOps, ImageEnhance, ImageTk
-from bubble_cleaner import (Cleaner, CleanRegion, prepare_region, encode_patch, decode_patch,
+from bubble_cleaner import (auto_region, Cleaner, CleanRegion, prepare_region, encode_patch, decode_patch,
                             compose_page, export_cleaned, encode_region, decode_region, lama_model_path)
 from frame_geometry import box_quad, frame_quad, valid_quad, quad_bounds, move_line, translation, ocr_crop, psd_stem, outline_read, auto_tilt, quad_angle
 
@@ -3549,7 +3549,9 @@ class ManhwaOCRApp:
                         except Exception as exc:
                             ocr_failed+=1;warning=' | OCR ซ้ำไม่พร้อม: '+str(exc)
                             self.events.put(('log',f'กรอบ {i+1}'+warning+' — ใช้พิกัดเดิม/ความต่างสีแทน'))
-                    region=prepare_region(image,b);region.note+=warning
+                    region=auto_region(image,b)
+                    if region is None:continue
+                    region.note+=warning
                     self.events.put(('clean_mask',(pid,b.id,region)));prepared+=1
                     if not np.any(region.mask):self.events.put(('log',f'กรอบ {i+1}: มาสก์ว่าง ต้องระบายก่อนคลีน'))
                 except Cancelled:raise
@@ -3608,6 +3610,9 @@ class ManhwaOCRApp:
                 self.events.put(('log',f'คลีนละเอียด {index+1}/{len(tasks)} — ประมวลผลทุกกรอบที่เลือก'))
                 try:
                     if pid!=last_pid:page_image=compose_page(load_image(path),patches);last_pid=pid
+                    if not region.manual_edited:
+                        region=auto_region(page_image,b,region)
+                        if region is None:continue
                     def read_result(result):
                         ub=clip_box(union_box([region.box,b.box]),page_image.width,page_image.height,pad=16)
                         rx0,ry0=ub[0],ub[1]
