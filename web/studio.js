@@ -180,9 +180,96 @@ function bars(){
 function bounds(b){
  const l=b.text_layer||{},box=l.box||b.box;
  if(l.editor_box)return [...l.editor_box];
- if(!l.text_size)return [...box];
- const [w,h]=l.text_size,cx=(box[0]+box[2])/2,cy=(box[1]+box[3])/2;
- return [cx-w/2,cy-h/2,cx+w/2,cy+h/2]
+ const bx=b.box||box, fs=l.font_size||24;
+ const padX=Math.max(16,fs*0.45), padY=Math.max(20,fs*0.65);
+ const cx=(box[0]+box[2])/2, cy=(box[1]+box[3])/2;
+ const [tw,th]=l.text_size||[box[2]-box[0],box[3]-box[1]];
+ const p=page();
+ const W=p?p.width:Math.max(bx[2],box[2]), H=p?p.height:Math.max(bx[3],box[3]);
+ const fw=Math.min(W,Math.max(bx[2]-bx[0],tw+2*padX));
+ const fh=Math.min(H,Math.max(bx[3]-bx[1],th+2*padY));
+ const ncx=Math.min(Math.max(cx,fw/2),W-fw/2);
+ const ncy=Math.min(Math.max(cy,fh/2),H-fh/2);
+ return [ncx-fw/2,ncy-fh/2,ncx+fw/2,ncy+fh/2]
+}
+const historyMap=new Map();
+let lastArrowPush={time:0,id:''};
+function pageHistory(){
+ const hk=key+':'+n;
+ if(!historyMap.has(hk))historyMap.set(hk,{undo:[],redo:[]});
+ return historyMap.get(hk)
+}
+function captureTransform(b){
+ if(!b)return null;
+ const l=b.text_layer||{};
+ return {
+  id:b.id,
+  bubble_box:[...b.box],
+  has_text:!!(b.translation&&b.translation.trim()&&(l.box||l.editor_box)),
+  editor_box:(l.box||l.editor_box)?bounds(b):null,
+  font_size:l.font_size??null,
+  rotation:l.rotation??0,
+  wrapped:l.text??null
+ }
+}
+function sameTransform(a,b){
+ if(!a||!b||a.id!==b.id)return false;
+ return JSON.stringify(a.bubble_box)===JSON.stringify(b.bubble_box)
+  && JSON.stringify(a.editor_box)===JSON.stringify(b.editor_box)
+  && a.font_size===b.font_size && a.rotation===b.rotation && a.wrapped===b.wrapped
+}
+function pushTransformHistory(before,after,label='การปรับตำแหน่ง',coalesceArrow=false){
+ if(!before||!after||sameTransform(before,after))return;
+ const h=pageHistory(), now=Date.now();
+ if(coalesceArrow&&h.undo.length&&lastArrowPush.id===before.id&&now-lastArrowPush.time<500){
+  h.undo[h.undo.length-1].after=after;
+  lastArrowPush.time=now;
+  h.redo=[];
+  return
+ }
+ h.undo.push({before,after,label});
+ if(h.undo.length>60)h.undo.shift();
+ h.redo=[];
+ if(coalesceArrow)lastArrowPush={time:now,id:before.id};
+ else lastArrowPush={time:0,id:''}
+}
+async function applyTransformSnap(snap,toastMsg){
+ if(!snap||!page())return;
+ await flush();
+ const target=page().bubbles.find(b=>b.id===snap.id);
+ if(!target)return;
+ id=target.id;
+ target.box=[...snap.bubble_box];
+ const payload={id:target.id,bubble_box:[...snap.bubble_box]};
+ if(snap.has_text&&snap.editor_box){
+  target.text_layer=target.text_layer||{};
+  target.text_layer.editor_box=[...snap.editor_box];
+  if(snap.font_size!=null)target.text_layer.font_size=snap.font_size;
+  target.text_layer.rotation=snap.rotation??0;
+  if(snap.wrapped!=null)target.text_layer.text=snap.wrapped;
+  Object.assign(payload,{box:[...snap.editor_box],font_size:target.text_layer.font_size,rotation:target.text_layer.rotation});
+  if(snap.wrapped!=null)payload.wrapped=snap.wrapped
+ }
+ const res=await api(key+'/page/'+n+'/edit',payload);
+ pages[n]=res.page;
+ sidebar();inspect();draw();
+ info(toastMsg)
+}
+async function performUndo(){
+ const h=pageHistory();
+ if(!h.undo.length){info('ไม่มีรายการปรับตำแหน่งให้ย้อนกลับ');return}
+ const entry=h.undo.pop();
+ h.redo.push(entry);
+ lastArrowPush={time:0,id:''};
+ await applyTransformSnap(entry.before,'Undo: ย้อน'+entry.label)
+}
+async function performRedo(){
+ const h=pageHistory();
+ if(!h.redo.length){info('ไม่มีรายการให้ทำซ้ำ (Redo)');return}
+ const entry=h.redo.pop();
+ h.undo.push(entry);
+ lastArrowPush={time:0,id:''};
+ await applyTransformSnap(entry.after,'Redo: ทำซ้ำ'+entry.label)
 }
 const loadedFonts=new Map();
 function family(font){
@@ -198,8 +285,9 @@ function updateCoordInfo(){
  let node=$('coordInfo'),b=bubble();if(!node||!b)return;
  let l=b.text_layer||{}, textMode=isTextTransform(b);
  let rect=textMode?bounds(b):b.box,[x,y,r,bt]=rect;
+ let rot=Math.round((l.rotation||0)*10)/10;
  node.textContent=textMode
-  ? `พิกัด ${Math.round(x)}, ${Math.round(y)} · ขนาด ${Math.round(r-x)}×${Math.round(bt-y)} · ฟอนต์ ${Math.round(l.font_size||24)} px`
+  ? `พิกัด ${Math.round(x)}, ${Math.round(y)} · ขนาด ${Math.round(r-x)}×${Math.round(bt-y)} · ฟอนต์ ${Math.round(l.font_size||24)} px`+(rot?` · หมุน ${rot}°`:'')
   : `กรอบ ${Math.round(x)}, ${Math.round(y)} · ${Math.round(r-x)}×${Math.round(bt-y)} px`;
 }
 function draw(){
@@ -236,6 +324,11 @@ function draw(){
    if(move&&!maskEdit){
     for(const [handle,hx,hy] of [['nw',0,0],['n',50,0],['ne',100,0],['e',100,50],['se',100,100],['s',50,100],['sw',0,100],['w',0,50]]){
      let a=el('i');a.className='handle';a.dataset.handle=handle;Object.assign(a.style,{left:hx+'%',top:hy+'%',cursor:handle+'-resize'});div.append(a)}
+    if(textMode){
+     for(const corner of ['nw','ne','se','sw']){
+      let rz=el('i');rz.className='rot-zone';rz.dataset.rot=corner;rz.title='ลากเพื่อหมุนข้อความ (กด Shift ค้างเพื่อ Snap ทีละ 15°)';div.append(rz)
+     }
+    }
    }
   }
  });
@@ -371,11 +464,17 @@ $('viewport').onpointerdown=e=>{
  if(target){
   if(target.dataset.id!==id){run(()=>selectBubble(target.dataset.id));return}
   if(!move)return;
-  let b=bubble();
+  let b=bubble(), before=captureTransform(b);
+  if(e.target.closest('.rot-zone')&&isTextTransform(b)){
+   let rect=bounds(b), cx=(rect[0]+rect[2])/2, cy=(rect[1]+rect[3])/2;
+   let startAngle=Math.atan2(p[1]-cy,p[0]-cx)*180/Math.PI;
+   drag={kind:'rotate',cx,cy,startAngle,baseRot:layer().rotation||0,before};
+   $('viewport').setPointerCapture(e.pointerId);return
+  }
   if(isTextTransform(b)){
-   drag={kind:'moveText',handle:e.target.dataset.handle||'',p,rect:bounds(b),size:layer().font_size||24}
+   drag={kind:'moveText',handle:e.target.dataset.handle||'',p,rect:bounds(b),size:layer().font_size||24,before}
   }else{
-   drag={kind:'moveBox',handle:e.target.dataset.handle||'',p,rect:[...b.box]}
+   drag={kind:'moveBox',handle:e.target.dataset.handle||'',p,rect:[...b.box],before}
   }
  }else drag={kind:'pan',p:[e.clientX,e.clientY],sx:$('viewport').scrollLeft,sy:$('viewport').scrollTop};
  $('viewport').setPointerCapture(e.pointerId)
@@ -396,6 +495,16 @@ $('viewport').onpointermove=e=>{
   ctx.beginPath();ctx.moveTo(...prev);ctx.lineTo(...p);ctx.stroke();return
  }
  if(drag.kind==='pan'){let v=$('viewport');v.scrollLeft=drag.sx+drag.p[0]-e.clientX;v.scrollTop=drag.sy+drag.p[1]-e.clientY;return}
+ if(drag.kind==='rotate'){
+  let cur=Math.atan2(p[1]-drag.cy,p[0]-drag.cx)*180/Math.PI;
+  let rot=drag.baseRot+(cur-drag.startAngle);
+  while(rot>180)rot-=360;while(rot<-180)rot+=360;
+  rot=e.shiftKey?Math.round(rot/15)*15:Math.round(rot);
+  if(rot===-180)rot=180;
+  layer().rotation=rot;
+  if($('rotation'))$('rotation').value=rot;
+  draw();return
+ }
  const dx=p[0]-drag.p[0],dy=p[1]-drag.p[1],k=drag.handle;
  let [x,y,r,bt]=drag.rect;
  if(drag.kind==='moveBox'){
@@ -450,8 +559,18 @@ $('viewport').onpointerup=e=>{
   });
   return
  }
- if(d.kind==='moveBox'){queueEdit({bubble_box:bubble().box});run(flush);return}
- if(d.kind==='moveText'){queueEdit({box:bounds(bubble()),font_size:layer().font_size,wrapped:layer().text});run(flush)}
+ if(d.kind==='rotate'){
+  pushTransformHistory(d.before,captureTransform(bubble()),'การหมุนข้อความ');
+  queueEdit({box:bounds(bubble()),rotation:layer().rotation});run(flush);return
+ }
+ if(d.kind==='moveBox'){
+  pushTransformHistory(d.before,captureTransform(bubble()),'การปรับกรอบ');
+  queueEdit({bubble_box:bubble().box});run(flush);return
+ }
+ if(d.kind==='moveText'){
+  pushTransformHistory(d.before,captureTransform(bubble()),d.handle?'การปรับขนาด':'การปรับตำแหน่ง');
+  queueEdit({box:bounds(bubble()),font_size:layer().font_size,wrapped:layer().text});run(flush)
+ }
 };
 $('viewport').onpointercancel=()=>{drag=null;$('paint').width=1;run(async()=>{if(key){pages=(await api(key+'/state')).pages;refresh()}})};
 $('viewport').onwheel=e=>{if(e.ctrlKey){e.preventDefault();scale(zoom*(e.deltaY>0?.9:1.1))}};
@@ -524,6 +643,8 @@ const commands={
  txtModal:['ส่งออก / นำเข้าคำแปล TXT',openTxtModal,'T'],
  saveJson:['บันทึกโปรเจกต์ JSON',()=>saveProjectJson(false),'Ctrl+S'],
  saveJsonAs:['บันทึกโปรเจกต์ JSON เป็นไฟล์ใหม่ (Save As)',()=>saveProjectJson(true),'Ctrl+Shift+S'],
+ undoTransform:['Undo ย้อนการปรับตำแหน่ง/ขนาด/หมุน',performUndo,'Ctrl+Z'],
+ redoTransform:['Redo ทำซ้ำการปรับตำแหน่ง/ขนาด/หมุน',performRedo,'Ctrl+Y'],
  gemini:['Gemini แปลทั้งหน้า',()=>command('translate',true),''],
  polish:['เกลาสำนวนกรอบนี้',()=>command('translate'),''],
  fx:['ดูดสี Auto fx',()=>command('fx'),''],
@@ -720,6 +841,11 @@ document.onkeydown=e=>{
  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();palette();return}
  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){e.preventDefault();run(()=>saveProjectJson(e.shiftKey));return}
  if($('dialog').open||e.target.closest('input,textarea,select'))return;
+ if((e.ctrlKey||e.metaKey)&&!e.altKey){
+  const k=e.key.toLowerCase();
+  if(k==='z'&&!e.shiftKey){e.preventDefault();run(maskEdit?undoMaskEdit:performUndo);return}
+  if(k==='y'||(k==='z'&&e.shiftKey)){e.preventDefault();if(!maskEdit)run(performRedo);return}
+ }
  if(e.key==='Escape'){
   if(drawFrame){e.preventDefault();drawFrame=false;bars();draw();info('');return}
   if(maskEdit){e.preventDefault();run(()=>cancelMaskEdit());return}
@@ -729,6 +855,7 @@ document.onkeydown=e=>{
  if(c&&!e.ctrlKey&&!e.metaKey&&!e.altKey){e.preventDefault();run(commands[c][1]);return}
  if(move&&!maskEdit&&bubble()&&e.key.startsWith('Arrow')){
   e.preventDefault();
+  let before=captureTransform(bubble());
   let dx=({ArrowLeft:-1,ArrowRight:1}[e.key]||0)*(e.shiftKey?5:1),dy=({ArrowUp:-1,ArrowDown:1}[e.key]||0)*(e.shiftKey?5:1);
   if(isTextTransform(bubble())){
    layer().editor_box=bounds(bubble()).map((v,i)=>v+(i%2?dy:dx));
@@ -740,6 +867,7 @@ document.onkeydown=e=>{
    bubble().box=[Math.round(nx),Math.round(ny),Math.round(nx+bw),Math.round(ny+bh)];
    queueEdit({bubble_box:bubble().box});
   }
+  pushTransformHistory(before,captureTransform(bubble()),'การปรับตำแหน่ง',true);
   draw()
  }
 };

@@ -533,9 +533,7 @@ def apply_font_preset(key: str, d: dict):
                             text_offset=[],
                             custom_rotation=None,
                         )
-                        x0, y0, x1, y1 = layer['box']
-                        w, h = layer.get('text_size', (x1 - x0, y1 - y0))
-                        layer['editor_box'] = [(x0 + x1 - w) / 2, (y0 + y1 - h) / 2, (x0 + x1 + w) / 2, (y0 + y1 + h) / 2]
+                        layer['editor_box'] = _default_editor_box(b, layer, raw_im)
                         if prev_fx.get('manual_effects'):
                             layer.update(prev_fx)
                         validate_layer(layer)
@@ -657,6 +655,23 @@ def _clip_bubble_box(raw, im):
     return [x0, y0, x1, y1]
 
 
+def _default_editor_box(b, layer, im):
+    """Full-bubble transform frame centered on text layout with generous padding so borders/handles never cut Thai text."""
+    x0, y0, x1, y1 = layer['box']
+    bx0, by0, bx1, by1 = b.box
+    fs = float(layer.get('font_size', 24) or 24)
+    pad_x = max(16.0, fs * 0.45)
+    pad_y = max(20.0, fs * 0.65)
+    cx = (x0 + x1) / 2.0
+    cy = (y0 + y1) / 2.0
+    tw, th = layer.get('text_size', (x1 - x0, y1 - y0))
+    full_w = min(float(im.width), max(float(bx1 - bx0), float(tw) + 2.0 * pad_x))
+    full_h = min(float(im.height), max(float(by1 - by0), float(th) + 2.0 * pad_y))
+    cx = min(max(cx, full_w / 2.0), float(im.width) - full_w / 2.0)
+    cy = min(max(cy, full_h / 2.0), float(im.height) - full_h / 2.0)
+    return [cx - full_w / 2.0, cy - full_h / 2.0, cx + full_w / 2.0, cy + full_h / 2.0]
+
+
 def text_update(im, page, b, d):
     if 'bubble_box' in d:
         b.box = _clip_bubble_box(d['bubble_box'], im)
@@ -686,9 +701,7 @@ def text_update(im, page, b, d):
                     layer[field] = previous[field]
     old = layer.get('editor_box')
     if old is None:
-        x0, y0, x1, y1 = layer['box']
-        w, h = layer.get('text_size', (x1 - x0, y1 - y0))
-        old = [(x0 + x1 - w) / 2, (y0 + y1 - h) / 2, (x0 + x1 + w) / 2, (y0 + y1 + h) / 2]
+        old = _default_editor_box(b, layer, im)
     rect = list(map(float, d.get('box', old)))
     x, y, r, bt = rect
     if not all(map(math.isfinite, rect)) or r <= x or bt <= y:
@@ -701,20 +714,23 @@ def text_update(im, page, b, d):
     w, h = r - x, bt - y
     cs, sn = abs(math.cos(math.radians(angle))), abs(math.sin(math.radians(angle)))
     rw, rh = w * cs + h * sn, w * sn + h * cs
-    if rw > im.width + 1 or rh > im.height + 1:
-        raise ValueError('กรอบข้อความใหญ่เกินหน้าภาพ')
+    tw_fit, th_fit = w, h
+    if rw > im.width or rh > im.height:
+        scale_fit = min(im.width / max(1e-6, rw), im.height / max(1e-6, rh)) * 0.998
+        tw_fit, th_fit = w * scale_fit, h * scale_fit
+        rw, rh = tw_fit * cs + th_fit * sn, tw_fit * sn + th_fit * cs
     cx = min(max((x + r) / 2, rw / 2), im.width - rw / 2)
     cy = min(max((y + bt) / 2, rh / 2), im.height - rh / 2)
     rect = [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2]
     layer.update(
-        box=[cx - rw / 2, cy - rh / 2, cx + rw / 2, cy + rh / 2],
+        box=[max(0.0, cx - rw / 2), max(0.0, cy - rh / 2), min(float(im.width), cx + rw / 2), min(float(im.height), cy + rh / 2)],
         editor_box=rect,
         font_size=size,
         rotation=angle,
         custom_rotation=angle,
         alignment=align,
         auto_leading=True,
-        text_size=[w, h],
+        text_size=[tw_fit, th_fit],
         custom_size=round(size),
     )
     if 'wrapped' in d:

@@ -547,15 +547,62 @@ class StudioPersistenceTests(unittest.TestCase):
                                 tab.locator('[data-cmd=maskApply]').click()
                                 tab.locator('#cleanPanel').wait_for(state='hidden', timeout=30000)
 
-                                # Test V-key Move/Transform (8 handles, resize, Shift+Arrow, color, PSD+MTP export)
+                                # Test V-key Move/Transform (full bubble frame, 8 handles, 4 rotate zones, Ctrl+Z/Ctrl+Y, PSD+MTP export)
                                 tab.keyboard.press('v')
                                 self.assertEqual(tab.locator('.handle').count(), 8)
+                                self.assertEqual(tab.locator('.rot-zone').count(), 4)
+                                self.assertEqual(tab.locator('.bubble .badge').count(), 0)
+                                self.assertEqual(tab.locator('.bubble .hud').count(), 0)
+
+                                # Verify full-bubble frame encloses Thai text span without cutting through glyphs
+                                box_check = tab.evaluate(
+                                    """() => {
+                                      const b = document.querySelector('.bubble.selected');
+                                      const s = b.querySelector('span');
+                                      const br = b.getBoundingClientRect(), sr = s.getBoundingClientRect();
+                                      const rotCursor = getComputedStyle(b.querySelector('.rot-zone')).cursor;
+                                      return {
+                                        bw: br.width, bh: br.height, sw: sr.width, sh: sr.height,
+                                        enclosed: sr.top >= br.top - 1 && sr.bottom <= br.bottom + 1,
+                                        rotCursor
+                                      };
+                                    }"""
+                                )
+                                self.assertTrue(box_check['enclosed'], f'Frame cuts through Thai text: {box_check}')
+                                self.assertIn('data:image/svg+xml', box_check['rotCursor'])
+
+                                # Test drag-rotate via outer corner .rot-zone -> persists -> Ctrl+Z undo -> Ctrl+Y redo
+                                rot_bb = tab.locator('[data-rot=ne]').bounding_box()
+                                rx, ry = rot_bb['x'] + rot_bb['width'] / 2, rot_bb['y'] + rot_bb['height'] / 2
+                                tab.mouse.move(rx, ry)
+                                tab.mouse.down()
+                                tab.mouse.move(rx + 20, ry + 55, steps=6)
+                                tab.mouse.up()
+                                tab.wait_for_timeout(450)
+                                rotated_val = float(tab.locator('#rotation').input_value())
+                                self.assertNotEqual(rotated_val, 0.0, 'Corner rotate zone did not rotate bubble')
+
+                                # Undo rotation with Ctrl+Z
+                                tab.keyboard.press('Control+z')
+                                tab.wait_for_function("() => document.getElementById('notice').textContent.includes('Undo:')", timeout=10000)
+                                self.assertEqual(float(tab.locator('#rotation').input_value()), 0.0)
+
+                                # Redo rotation with Ctrl+Y
+                                tab.keyboard.press('Control+y')
+                                tab.wait_for_function("() => document.getElementById('notice').textContent.includes('Redo:')", timeout=10000)
+                                self.assertEqual(float(tab.locator('#rotation').input_value()), rotated_val)
+
+                                # Undo back to 0° cleanly before corner-scale + export test
+                                tab.keyboard.press('Control+z')
+                                tab.wait_for_timeout(350)
+                                self.assertEqual(float(tab.locator('#rotation').input_value()), 0.0)
+
                                 handle = tab.locator('[data-handle=se]').bounding_box()
                                 x, y = handle['x'] + 4, handle['y'] + 4
                                 old = int(tab.locator('#size').input_value())
                                 tab.mouse.move(x, y)
                                 tab.mouse.down()
-                                tab.mouse.move(x + 20, y + 10)
+                                tab.mouse.move(x + 36, y + 18, steps=4)
                                 tab.mouse.up()
                                 self.assertGreater(int(tab.locator('#size').input_value()), old)
                                 tab.keyboard.press('Shift+ArrowRight')
