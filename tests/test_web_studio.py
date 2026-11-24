@@ -117,20 +117,21 @@ class StudioPersistenceTests(unittest.TestCase):
         b_new = Bubble(box=[180, 120, 360, 220], text='', translation='', score=1.0)
         calls = []
 
-        class FakeEngine:
-            name = 'RapidOCR (PP-OCRv5)'
-
         class FakePipe:
-            def iter_engines(self):
-                yield FakeEngine()
-
-            def read(self, eng, crop, variant):
-                return [Line('HELLO!', [10, 12, 90, 42], 0.94, eng.name)]
+            def candidates(self, image, bubble):
+                return [
+                    {'text': 'HELLO', 'score': 0.88, 'engine': 'RapidOCR (PP-OCRv5)/original-crop'},
+                    {'text': 'HELLO!', 'score': 0.94, 'engine': 'RapidOCR (PP-OCRv5)/contrast-2x'},
+                ]
 
             def scan(self, image):
-                return [Bubble(box=[10, 10, 100, 80], text='SCANNED', score=0.95)]
+                return [
+                    Bubble(box=[10, 10, 100, 80], text='SCANNED', score=0.95, engine='RapidOCR (PP-OCRv5)'),
+                    Bubble(box=[150, 20, 240, 120], text='', score=0.0, engine='detected / unread'),
+                    Bubble(box=[250, 20, 340, 120], text='   ', score=0.0, engine='detected / unread'),
+                ]
 
-        def fake_reader(lang='ko+en', engine='auto', neural=True, type_scan=True):
+        def fake_reader(lang='ko+en', engine='auto', neural=True, type_scan=False):
             calls.append((lang, engine, neural, type_scan))
             return FakePipe()
 
@@ -139,7 +140,7 @@ class StudioPersistenceTests(unittest.TestCase):
             im.save(source)
             studio.save('ocrjob', 'OCR', [Page(str(source), [b_existing, b_new])], {})
 
-            # Single-bubble RapidOCR updates ONLY b_new and preserves b_existing
+            # Single-bubble RapidOCR delegates to LocalPipeline.candidates, updates ONLY b_new
             res = studio.action('ocrjob', 0, 'ocr_bubble', {'id': b_new.id, 'lang': 'en'})
             self.assertEqual(res['text'], 'HELLO!')
             self.assertAlmostEqual(res['score'], 0.94, places=2)
@@ -148,13 +149,20 @@ class StudioPersistenceTests(unittest.TestCase):
             self.assertEqual(pages[0].bubbles[0].text, 'KEEP ME')
             self.assertEqual(pages[0].bubbles[0].translation, 'เก็บไว้')
             self.assertEqual(pages[0].bubbles[1].text, 'HELLO!')
-            self.assertEqual(len(pages[0].bubbles[1].lines), 1)
+            self.assertEqual(len(pages[0].bubbles[1].candidates), 2)
 
-            # Batch OCR passes chosen lang & engine
+            # Batch OCR uses legacy type_scan=False and filters out empty / OCR 0% false positives
             bres = studio.batch_action('ocrjob', 'ocr', {'replace': True, 'lang': 'zh+en', 'engine': 'paddle'})
-            self.assertEqual(calls[-1], ('zh+en', 'paddle', True, True))
+            self.assertEqual(calls[-1], ('zh+en', 'paddle', True, False))
             self.assertIn('paddle', bres['note'])
             self.assertIn('zh+en', bres['note'])
+            self.assertEqual(len(bres['pages'][0]['bubbles']), 1)
+            self.assertEqual(bres['pages'][0]['bubbles'][0]['text'], 'SCANNED')
+
+            # Manually created frames via + กรอบ are kept even when empty
+            added = studio.action('ocrjob', 0, 'add_bubble', {'box': [20, 140, 150, 220]})
+            self.assertEqual(len(added['page']['bubbles']), 2)
+            self.assertEqual(added['page']['bubbles'][-1]['text'], '')
 
     def test_mask_edit_preview_cancel_and_apply(self):
         im = Image.new('RGB', (400, 300), '#9fb3c8')

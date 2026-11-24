@@ -19,13 +19,12 @@ import numpy as np
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from PIL import Image, ImageEnhance, ImageOps
+from PIL import Image
 import uvicorn
 
 import manhwa_ocr as core
 from bubble_cleaner import Cleaner, compose_page, prepare_region, encode_region, decode_region, encode_patch
 from clean_quality import clean_checked
-from frame_geometry import map_points, ocr_crop, quad_bounds
 from text_layout import (
     FONT_CHOICES,
     detect_and_parse_translations,
@@ -47,7 +46,15 @@ jobs = {}
 mask_sessions = {}
 pipelines = {}
 pipeline = None
+ocr_cache = None
 cleaner_inst = None
+
+
+def get_ocr_cache():
+    global ocr_cache
+    if ocr_cache is None:
+        ocr_cache = core.OCRCache()
+    return ocr_cache
 
 
 def get_cleaner():
@@ -332,7 +339,7 @@ def text_update(im, page, b, d):
     b.text_layer = layer
 
 
-def reader(lang='ko+en', engine='auto', neural=True, type_scan=True):
+def reader(lang='ko+en', engine='auto', neural=True, type_scan=False):
     global pipeline
     if lang not in VALID_OCR_LANGS:
         raise ValueError(f'ไม่รองรับภาษา OCR: {lang}')
@@ -342,58 +349,53 @@ def reader(lang='ko+en', engine='auto', neural=True, type_scan=True):
     pipe = pipelines.get(key)
     if pipe is None:
         pipe = core.LocalPipeline(
-            core.OCRCache(),
+            get_ocr_cache(),
             mode=engine,
             lang=lang,
             gpu=core._auto_gpu_default(),
             neural=bool(neural),
+            retry=False,
+            fast=True,
+            bubble_only=True,
             type_scan=bool(type_scan),
+            prefer_rapid=True,
             log=print,
+            cancel=cancel,
         )
         pipelines[key] = pipe
-    if key == ('auto', 'ko+en', True, True):
+    if key == ('auto', 'ko+en', True, False):
         pipeline = pipe
     return pipe
 
 
+def _filter_ocr_bubbles(bubbles):
+    """Drop empty / 0%-confidence false-positive detections from auto OCR."""
+    return [b for b in bubbles if (b.text or '').strip() and float(getattr(b, 'score', 0) or 0) > 0]
+
+
 def _ocr_single_bubble_rapid(im, b, lang='ko+en'):
-    crop, inv = ocr_crop(im, b, pad=8)
-    if min(crop.size) < 2:
-        raise ValueError('กรอบเล็กเกินไปสำหรับอ่าน OCR')
+    """Delegate single-bubble RapidOCR to manhwa_ocr.LocalPipeline.candidates."""
     pipe = reader(lang=lang, engine='rapid', neural=False, type_scan=False)
-    eng = next(pipe.iter_engines())
-    best_lines = core.order_lines(pipe.read(eng, crop, 'original-crop'))
-    best_scale = 1.0
-    best_score = min((l.score for l in best_lines), default=0.0)
-    if not best_lines or best_score < 0.78:
-        factor = min(2.0, max(1.0, 1600 / max(crop.size)))
-        scaled = crop.resize(
-            (max(1, round(crop.width * factor)), max(1, round(crop.height * factor))),
-            Image.Resampling.LANCZOS,
-        )
-        contrast = ImageEnhance.Contrast(ImageOps.autocontrast(scaled.convert('L'))).enhance(1.35).convert('RGB')
-        alt_lines = core.order_lines(pipe.read(eng, contrast, 'contrast-2x'))
-        alt_score = min((l.score for l in alt_lines), default=0.0)
-        if alt_lines and (not best_lines or alt_score > best_score):
-            best_lines = alt_lines
-            best_scale = factor
-            best_score = alt_score
-    mapped = []
-    for l in best_lines:
-        x0, y0, x1, y1 = [v / best_scale for v in l.box]
-        pts = map_points([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], inv)
-        box = core.clip_box(quad_bounds(pts), im.width, im.height)
-        mapped.append({'text': l.text, 'box': box, 'score': float(l.score), 'engine': eng.name})
-    b.text = core.join_lines([l.text for l in best_lines])
-    b.score = float(best_score) if best_lines else 0.0
-    b.engine = eng.name
-    b.lines = mapped
+    probe = copy.copy(b)
+    probe.text = ''
+    candidates = pipe.candidates(im, probe)
+    if not candidates:
+        b.text = ''
+        b.score = 0.0
+        b.engine = 'RapidOCR (PP-OCRv5)'
+        b.candidates = []
+        return '', 0.0
+    best = max(candidates, key=lambda c: float(c.get('score', 0) or 0))
+    b.text = best['text']
+    b.score = float(best.get('score', 0) or 0)
+    b.engine = best.get('engine', 'RapidOCR (PP-OCRv5)')
+    b.candidates = candidates
     return b.text, b.score
 
 
 def _make_verifier(reg):
     def verify(result):
-        pipe = reader()
+        pipe = reader(lang='ko+en', engine='auto', neural=False, type_scan=False)
         lines = pipe.read(next(pipe.iter_engines()), result, 'studio-clean')
         return [
             dict(
@@ -474,14 +476,14 @@ def batch_action(key: str, action: str, d: dict):
             engine = d.get('engine', 'rapid')
             for k_sess in [k for k in mask_sessions if k[0] == key]:
                 mask_sessions.pop(k_sess, None)
-            pipe = reader(lang=lang, engine=engine, neural=True, type_scan=True)
+            pipe = reader(lang=lang, engine=engine, neural=True, type_scan=False)
             total = 0
             for p in pages:
                 for old in p.bubbles:
                     masks.pop(old.id, None)
                     masks.pop('undo:' + old.id, None)
                 im = core.load_image(p.path)
-                p.bubbles = pipe.scan(im)
+                p.bubbles = _filter_ocr_bubbles(pipe.scan(im))
                 p.clean_patches = []
                 total += len(p.bubbles)
             note = f'OCR ({engine} · {lang}) สำเร็จ {len(pages)} หน้า • {total} กรอบ'
@@ -578,7 +580,7 @@ def action(key: str, n: int, action: str, d: dict):
                 masks.pop(old.id, None)
                 masks.pop('undo:' + old.id, None)
                 mask_sessions.pop((key, n, old.id), None)
-            p.bubbles = reader(lang=lang, engine=engine, neural=True, type_scan=True).scan(im)
+            p.bubbles = _filter_ocr_bubbles(reader(lang=lang, engine=engine, neural=True, type_scan=False).scan(im))
             p.clean_patches = []
         elif action == 'translate':
             from gemini_translator import translate_pages_with_gemini
