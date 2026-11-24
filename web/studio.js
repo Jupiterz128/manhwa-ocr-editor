@@ -1,7 +1,7 @@
 'use strict';
 const $=id=>document.getElementById(id), el=(tag,txt)=>Object.assign(document.createElement(tag),{textContent:txt??''});
 const btn=(text,fn)=>{let b=el('button',text);b.onclick=()=>run(fn);return b};
-let key='',pages=[],fonts=[],n=0,id='',view='original',zoom=1,move=false,drawFrame=false,maskEdit=false,maskPreviewOn=false,hasMaskPreview=false,prevView='clean',erase=false,revision=0,busy=false;
+let key='',pages=[],fonts=[],n=0,id='',view='original',zoom=1,move=false,drawFrame=false,maskEdit=false,maskPreviewOn=false,hasMaskPreview=false,prevView='clean',erase=false,revision=0,busy=false,jsonPath='';
 let ocrLang=sessionStorage.getItem('studio-ocr-lang')||'ko+en';
 let ocrEngine=sessionStorage.getItem('studio-ocr-engine')||'rapid';
 const page=()=>pages[n], bubble=()=>page()?.bubbles.find(b=>b.id===id), layer=()=>bubble()?.text_layer||{};
@@ -9,7 +9,17 @@ const bubbleIndex=b=>(page()?.bubbles||[]).findIndex(x=>x.id===b?.id);
 const bubbleCode=b=>{let i=bubbleIndex(b);return i>=0?'B'+String(i+1).padStart(2,'0'):(b?.id||'')};
 const rgb=color=>'#'+(color||[0,0,0]).map(x=>Number(x).toString(16).padStart(2,'0')).join('');
 const triplet=s=>[1,3,5].map(i=>parseInt(s.slice(i,i+2),16));
-const info=txt=>$('notice').textContent=txt;
+function info(txt,revealPath=''){
+ let box=$('notice');box.replaceChildren();
+ if(!txt)return;
+ let s=el('span',txt);s.title=txt;box.append(s);
+ if(revealPath){
+  let openBtn=btn('📂 เปิดโฟลเดอร์',()=>api('reveal',{path:revealPath}));
+  openBtn.className='mini btn-reveal';
+  let xBtn=btn('×',()=>info(''));xBtn.className='toast-close';xBtn.title='ปิดแจ้งเตือน';
+  box.append(openBtn,xBtn)
+ }
+}
 async function run(fn){try{await fn()}catch(e){info(e.message)}}
 async function api(path,data){
  let opts=data===undefined?{}:{method:'POST',headers:{'x-studio':'editor'},body:data};
@@ -46,11 +56,27 @@ function isTextTransform(b){
 async function project(k,title){
  await flush();
  if(maskEdit)await cancelMaskEdit(true);
- let st=await api(k+'/state');key=k;localStorage.setItem('studio-project',k);pages=st.pages;fonts=st.fonts;
+ let st=await api(k+'/state');key=k;localStorage.setItem('studio-project',k);pages=st.pages;fonts=st.fonts;jsonPath=st.json_path||'';
  $('projectName').textContent=title;n=0;id=page()?.bubbles[0]?.id||'';drawFrame=false;maskEdit=false;fit();refresh()
 }
-async function projectList(){let m=modal('เปิดโปรเจกต์');m.append(btn('นำเข้าภาพ / .mtp',()=>{$('dialog').close();$('files').click()}));
- for(const [k,title] of await api('projects'))m.append(btn(title,async()=>{$('dialog').close();await project(k,title)}))}
+async function projectList(){
+ let m=modal('เปิดโปรเจกต์');
+ let openJsonBtn=btn('📂 เปิดไฟล์โปรเจกต์ .json',async()=>{
+  const res=await api('open-json',{});
+  if(res&&!res.cancelled){$('dialog').close();await project(res.key,res.name);info('เปิดโปรเจกต์ JSON แล้ว: '+res.path,res.path)}
+ });
+ openJsonBtn.className='primary';
+ m.append(openJsonBtn,btn('นำเข้าภาพ / .mtp / .json',()=>{$('dialog').close();$('files').click()}));
+ for(const [k,title] of await api('projects'))m.append(btn(title,async()=>{$('dialog').close();await project(k,title)}))
+}
+async function saveProjectJson(saveAs=false){
+ if(!key){info('เปิดโปรเจกต์ก่อนบันทึก JSON');return}
+ await flush();
+ const res=await api(key+'/save-json',{save_as:!!saveAs});
+ if(!res||res.cancelled)return;
+ jsonPath=res.path||'';
+ info(res.note,res.path)
+}
 $('open').onclick=()=>run(projectList);$('create').onclick=$('pick').onclick=()=>$('files').click();
 $('files').onchange=()=>run(async()=>{if(!$('files').files.length)return;await flush();let form=new FormData();for(let f of $('files').files)form.append('files',f);info('กำลังเปิดโปรเจกต์…');let k=await api('projects',form);await project(k,$('files').files[0].name);$('files').value='';info('')});
 async function selectPage(i){
@@ -398,6 +424,8 @@ const commands={
  maskApply:['บันทึกผล Clean (ตกลง)',applyMaskEdit,''],
  maskCancel:['ยกเลิกแก้ Mask',()=>cancelMaskEdit(),'Esc'],
  txtModal:['ส่งออก / นำเข้าคำแปล TXT',openTxtModal,'T'],
+ saveJson:['บันทึกโปรเจกต์ JSON',()=>saveProjectJson(false),'Ctrl+S'],
+ saveJsonAs:['บันทึกโปรเจกต์ JSON เป็นไฟล์ใหม่ (Save As)',()=>saveProjectJson(true),'Ctrl+Shift+S'],
  gemini:['Gemini แปลทั้งหน้า',()=>command('translate',true),''],
  polish:['เกลาสำนวนกรอบนี้',()=>command('translate'),''],
  fx:['ดูดสี Auto fx',()=>command('fx'),''],
@@ -485,11 +513,14 @@ async function openTxtModal(){
   try{await navigator.clipboard.writeText(area.value)}catch{area.select();document.execCommand('copy')}
   status.textContent='คัดลอกข้อความแล้ว'
  });
- let saveBtn=btn('บันทึก _ocr.txt',()=>{
-  let blob=new Blob([area.value+'\n'],{type:'text/plain;charset=utf-8'});
-  let a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=filename;a.click();
-  setTimeout(()=>URL.revokeObjectURL(a.href),1000);
-  status.textContent='บันทึกไฟล์ '+filename+' แล้ว'
+ let saveBtn=btn('บันทึก _ocr.txt',async()=>{
+  saveBtn.disabled=true;
+  try{
+   const res=await api(key+'/txt/save',{mode:fmt.value,text:area.value});
+   if(res.cancelled){status.textContent='ยกเลิกการบันทึก';return}
+   status.replaceChildren(el('span',res.note+' '),Object.assign(btn('📂 เปิดโฟลเดอร์',()=>api('reveal',{path:res.path})),{className:'mini btn-reveal'}));
+   info(res.note,res.path)
+  }finally{saveBtn.disabled=false}
  });
  let loadBtn=btn('เปิดไฟล์ .txt',()=>$('txtFile').click());
  $('txtFile').onchange=async()=>{
@@ -516,22 +547,46 @@ async function openTxtModal(){
 async function exportModal(){
  if(!key)return;await flush();
  let m=modal('ส่งออกโปรเจกต์');
- m.insertAdjacentHTML('beforeend','<label>Backend<select id="backend"><option value="photopea">Photopea Headless</option><option value="photoshop">Adobe Photoshop</option></select></label><label>รูปแบบ<select id="format"><option value="psd">PSD</option><option value="mtp">MTP</option><option value="all">PSD + MTP</option></select></label><label><input type="checkbox" id="fxOn" checked> แนบ Live Layer Style</label><label><input type="checkbox" id="drive"> อัปโหลด Google Drive</label><progress max="100" value="0"></progress>');
- let bar=m.querySelector('progress');
+ const lastDir=localStorage.getItem('studio-export-dir')||'';
+ m.insertAdjacentHTML('beforeend',
+  '<label>โฟลเดอร์ปลายทาง</label>'
+  +'<div class="export-dir-row"><input id="exportDir" readonly placeholder="โฟลเดอร์โปรเจกต์ (กดเลือกโฟลเดอร์เพื่อเปลี่ยน)"><button type="button" id="pickExportDir">📂 เลือกโฟลเดอร์…</button></div>'
+  +'<label>Backend<select id="backend"><option value="photopea">Photopea Headless</option><option value="photoshop">Adobe Photoshop</option></select></label>'
+  +'<label>รูปแบบ<select id="format"><option value="psd">PSD</option><option value="mtp">MTP</option><option value="all">PSD + MTP</option></select></label>'
+  +'<label><input type="checkbox" id="fxOn" checked> แนบ Live Layer Style</label>'
+  +'<label><input type="checkbox" id="drive"> อัปโหลด Google Drive</label>'
+  +'<progress max="100" value="0"></progress><div id="exportResult"></div>'
+ );
+ $('exportDir').value=lastDir;
+ $('pickExportDir').onclick=()=>run(async()=>{
+  const res=await api('pick-folder',{title:'เลือกโฟลเดอร์ปลายทางสำหรับ Export PSD / MTP',initial_dir:$('exportDir').value});
+  if(res&&!res.cancelled&&res.path){$('exportDir').value=res.path;localStorage.setItem('studio-export-dir',res.path)}
+ });
+ let bar=m.querySelector('progress'),outBox=$('exportResult');
  let submit=btn('ส่งออก',async()=>{
-  submit.disabled=true;
+  submit.disabled=true;outBox.replaceChildren();
   try{
-   const j=await api(key+'/export',{backend:$('backend').value,format:$('format').value,fx:$('fxOn').checked,drive:$('drive').checked});
+   const dest=$('exportDir').value.trim();
+   const j=await api(key+'/export',{backend:$('backend').value,format:$('format').value,fx:$('fxOn').checked,drive:$('drive').checked,destination:dest});
    while(true){
     let r=await api('jobs/'+j+'/progress');bar.value=r.value;
     if(r.done){
-     for(let f of r.files){let a=el('a',f);a.href='/api/jobs/'+j+'/file/'+encodeURIComponent(f);a.download=f;m.append(el('br'),a)}
-     m.append(el('p',r.error||r.folder));break
+     for(let f of r.files){let a=el('a',f);a.href='/api/jobs/'+j+'/file/'+encodeURIComponent(f);a.download=f;outBox.append(el('br'),a)}
+     if(r.error){outBox.append(el('p',r.error))}
+     else{
+      const target=(r.paths&&r.paths[0])||r.folder;
+      outBox.append(el('p',r.folder));
+      let openBtn=btn('📂 เปิดโฟลเดอร์',()=>api('reveal',{path:target}));openBtn.className='btn-reveal';
+      outBox.append(openBtn);
+      info('ส่งออกสำเร็จ: '+r.folder,target)
+     }
+     break
     }
     await new Promise(ok=>setTimeout(ok,500))
    }
   }finally{submit.disabled=false}
  });
+ submit.className='primary';
  m.append(submit)
 }
 document.onclick=e=>{
@@ -545,7 +600,8 @@ $('eraser').onclick=()=>{erase=true;bars()};
 $('radius').oninput=()=>{$('radiusValue').value=$('radius').value};
 $('maskToggle').onclick=()=>{if(!hasMaskPreview)return;maskPreviewOn=!maskPreviewOn;image();bars()};
 document.onkeydown=e=>{
- if(e.ctrlKey&&e.key.toLowerCase()==='k'){e.preventDefault();palette();return}
+ if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();palette();return}
+ if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){e.preventDefault();run(()=>saveProjectJson(e.shiftKey));return}
  if($('dialog').open||e.target.closest('input,textarea,select'))return;
  if(e.key==='Escape'){
   if(drawFrame){e.preventDefault();drawFrame=false;bars();draw();info('');return}

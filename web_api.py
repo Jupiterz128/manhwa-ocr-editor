@@ -7,6 +7,7 @@ import os
 import shutil
 import socket
 import sqlite3
+import subprocess
 import threading
 import uuid
 import webbrowser
@@ -48,6 +49,132 @@ pipelines = {}
 pipeline = None
 ocr_cache = None
 cleaner_inst = None
+main_window = None
+
+
+def _pick_save_path(default_name, filetypes, title='บันทึกไฟล์', initial_dir=''):
+    """Open native Windows Save As dialog via pywebview (preferred) or Tk fallback."""
+    if main_window is not None:
+        try:
+            import webview
+
+            dialog_type = getattr(getattr(webview, 'FileDialog', None), 'SAVE', None) or getattr(webview, 'SAVE_DIALOG', 30)
+            ft = tuple(f'{label} ({pat})' for label, pat in filetypes)
+            chosen = main_window.create_file_dialog(
+                dialog_type, directory=str(initial_dir or ''), save_filename=default_name, file_types=ft
+            )
+            if isinstance(chosen, (list, tuple)):
+                chosen = chosen[0] if chosen else ''
+            return Path(chosen) if chosen else None
+        except Exception:
+            pass
+    import tkinter as tk
+    from tkinter import filedialog
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        root.attributes('-topmost', True)
+    except Exception:
+        pass
+    try:
+        ext = Path(default_name).suffix or ''
+        chosen = filedialog.asksaveasfilename(
+            parent=root,
+            title=title,
+            initialdir=str(initial_dir) if initial_dir else None,
+            initialfile=default_name,
+            defaultextension=ext,
+            filetypes=list(filetypes) + [('All files', '*.*')],
+        )
+        return Path(chosen) if chosen else None
+    finally:
+        root.destroy()
+
+
+def _pick_open_path(filetypes, title='เปิดไฟล์โปรเจกต์', initial_dir=''):
+    """Open native Windows Open File dialog via pywebview or Tk fallback."""
+    if main_window is not None:
+        try:
+            import webview
+
+            dialog_type = getattr(getattr(webview, 'FileDialog', None), 'OPEN', None) or getattr(webview, 'OPEN_DIALOG', 10)
+            ft = tuple(f'{label} ({pat})' for label, pat in filetypes)
+            chosen = main_window.create_file_dialog(
+                dialog_type, directory=str(initial_dir or ''), allow_multiple=False, file_types=ft
+            )
+            if isinstance(chosen, (list, tuple)):
+                chosen = chosen[0] if chosen else ''
+            return Path(chosen) if chosen else None
+        except Exception:
+            pass
+    import tkinter as tk
+    from tkinter import filedialog
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        root.attributes('-topmost', True)
+    except Exception:
+        pass
+    try:
+        chosen = filedialog.askopenfilename(
+            parent=root,
+            title=title,
+            initialdir=str(initial_dir) if initial_dir else None,
+            filetypes=list(filetypes) + [('All files', '*.*')],
+        )
+        return Path(chosen) if chosen else None
+    finally:
+        root.destroy()
+
+
+def _pick_folder_path(title='เลือกโฟลเดอร์ปลายทาง', initial_dir=''):
+    """Open native Windows Folder picker via pywebview or Tk fallback."""
+    if main_window is not None:
+        try:
+            import webview
+
+            dialog_type = getattr(getattr(webview, 'FileDialog', None), 'FOLDER', None) or getattr(webview, 'FOLDER_DIALOG', 20)
+            chosen = main_window.create_file_dialog(dialog_type, directory=str(initial_dir or ''))
+            if isinstance(chosen, (list, tuple)):
+                chosen = chosen[0] if chosen else ''
+            return Path(chosen) if chosen else None
+        except Exception:
+            pass
+    import tkinter as tk
+    from tkinter import filedialog
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        root.attributes('-topmost', True)
+    except Exception:
+        pass
+    try:
+        chosen = filedialog.askdirectory(
+            parent=root,
+            title=title,
+            initialdir=str(initial_dir) if initial_dir else None,
+        )
+        return Path(chosen) if chosen else None
+    finally:
+        root.destroy()
+
+
+def _reveal_in_explorer(target: Path):
+    target = Path(target).resolve()
+    if not target.exists():
+        if target.parent.exists():
+            target = target.parent
+        else:
+            raise ValueError(f'ไม่พบไฟล์หรือโฟลเดอร์: {target}')
+    if os.name == 'nt':
+        if target.is_file():
+            subprocess.Popen(['explorer', f'/select,{str(target)}'])
+        else:
+            subprocess.Popen(['explorer', str(target)])
+    return str(target)
 
 
 def get_ocr_cache():
@@ -90,13 +217,74 @@ def project_name(key):
     return row[0] if row and row[0] else 'manhwa'
 
 
-def save(key, name, pages, masks):
-    state = json.dumps(dict(pages=[asdict(p) for p in pages], masks=masks), ensure_ascii=False)
+def project_json_path(key):
+    with closing(store()) as db:
+        row = db.execute('SELECT state FROM projects WHERE id=?', (key,)).fetchone()
+    if not row:
+        return ''
+    try:
+        return str(json.loads(row[0]).get('json_path') or '')
+    except Exception:
+        return ''
+
+
+def save(key, name, pages, masks, json_path=None):
+    if json_path is None:
+        json_path = project_json_path(key)
+    state = json.dumps(
+        dict(pages=[asdict(p) for p in pages], masks=masks, json_path=str(json_path or '')),
+        ensure_ascii=False,
+    )
     with closing(store()) as db, db:
         db.execute(
             'INSERT INTO projects VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state',
             (key, name, state),
         )
+
+
+def _load_json_project_file(json_file: Path):
+    data = json.loads(json_file.read_text(encoding='utf-8-sig'))
+    if not isinstance(data, dict) or data.get('format') != 'manhwa-ocr-project' or not isinstance(data.get('pages'), list):
+        raise ValueError('ไฟล์ .json นี้ไม่ใช่โปรเจกต์ Manhwa OCR Editor ที่ถูกต้อง')
+    pages, drafts, missing = core.read_project_pages(data, json_file)
+    if missing:
+        raise ValueError(f'ไม่พบไฟล์ภาพต้นฉบับในโปรเจกต์ .json: {missing[0].path}')
+    masks = {}
+    raw_studio_masks = data.get('studio_masks')
+    if isinstance(raw_studio_masks, dict):
+        masks.update(raw_studio_masks)
+    for (_, bid), reg in drafts.items():
+        if bid not in masks:
+            masks[bid] = encode_region(reg)
+    title = str(data.get('name') or json_file.name)
+    return pages, masks, title
+
+
+def _write_json_project_file(dest: Path, pages, masks, title):
+    dest = Path(dest)
+    if dest.suffix.lower() != '.json':
+        dest = dest.with_suffix('.json')
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    records = []
+    for p in pages:
+        rec = asdict(p)
+        rec['clean_drafts'] = {
+            b.id: masks[b.id]
+            for b in p.bubbles
+            if b.id in masks and isinstance(masks[b.id], dict) and 'image' in masks[b.id]
+        }
+        rec['path'] = str(Path(p.path).resolve())
+        records.append(rec)
+    payload = {
+        'format': 'manhwa-ocr-project',
+        'version': 5,
+        'studio_version': '4.0',
+        'name': title,
+        'pages': records,
+        'studio_masks': masks,
+    }
+    core.atomic_json(dest, payload)
+    return dest.resolve()
 
 
 def summary(page):
@@ -147,30 +335,78 @@ def create(files: list[UploadFile] = File(...)):
     folder = ROOT / key
     folder.mkdir(parents=True)
     pages = []
+    masks = {}
+    title = Path(files[0].filename or 'page.png').name
     try:
         for idx, item in enumerate(files):
             dest = folder / str(idx) / Path(item.filename or 'page.png').name
             dest.parent.mkdir()
             with dest.open('xb') as stream:
                 shutil.copyfileobj(item.file, stream)
-            if dest.suffix.lower() == '.mtp':
+            ext = dest.suffix.lower()
+            if ext == '.mtp':
                 imported, _, _ = core.read_mtp(dest, cancel, lambda _: None)
                 pages.extend(imported)
+            elif ext == '.json':
+                j_pages, j_masks, j_title = _load_json_project_file(dest)
+                pages.extend(j_pages)
+                masks.update(j_masks)
+                if idx == 0:
+                    title = j_title
             else:
                 with Image.open(dest) as im:
                     im.verify()
                 pages.append(core.Page(str(dest)))
-        save(key, Path(files[0].filename).name, pages, {})
+        save(key, title, pages, masks, json_path='')
     except Exception:
         shutil.rmtree(folder)
         raise
     return key
 
 
+@app.post('/api/open-json')
+def open_json_project(d: dict | None = None):
+    d = d or {}
+    if d.get('path'):
+        chosen = Path(d['path'])
+    else:
+        chosen = _pick_open_path([('Manhwa OCR Project', '*.json')], title='เปิดไฟล์โปรเจกต์ (.json)')
+    if chosen is None:
+        return dict(cancelled=True)
+    chosen = chosen.resolve()
+    if not chosen.is_file():
+        raise ValueError(f'ไม่พบไฟล์: {chosen}')
+    pages, masks, title = _load_json_project_file(chosen)
+    key = uuid.uuid4().hex
+    save(key, title, pages, masks, json_path=str(chosen))
+    return dict(cancelled=False, key=key, name=title, path=str(chosen))
+
+
+@app.post('/api/pick-folder')
+def pick_folder(d: dict | None = None):
+    d = d or {}
+    chosen = _pick_folder_path(
+        title=str(d.get('title') or 'เลือกโฟลเดอร์ปลายทาง'),
+        initial_dir=str(d.get('initial_dir') or ''),
+    )
+    if chosen is None:
+        return dict(cancelled=True, path='')
+    return dict(cancelled=False, path=str(chosen.resolve()))
+
+
+@app.post('/api/reveal')
+def reveal_path(d: dict):
+    raw = str(d.get('path') or '').strip()
+    if not raw:
+        raise ValueError('ไม่ได้ระบุพาธไฟล์หรือโฟลเดอร์')
+    opened = _reveal_in_explorer(Path(raw))
+    return dict(ok=True, path=opened)
+
+
 @app.get('/api/{key}/state')
 def state(key: str):
     pages, _ = load(key)
-    return dict(pages=[summary(p) for p in pages], fonts=list(FONT_CHOICES))
+    return dict(pages=[summary(p) for p in pages], fonts=list(FONT_CHOICES), json_path=project_json_path(key))
 
 
 @app.get('/api/font/{font}')
@@ -433,6 +669,63 @@ def export_txt(key: str, mode: str = 'id_template'):
     return dict(mode=mode, text=text, filename=f'{stem}_ocr.txt')
 
 
+@app.post('/api/{key}/txt/save')
+def save_txt_file(key: str, d: dict):
+    pages, _ = load(key)
+    mode = str(d.get('mode') or 'id_template')
+    if mode not in ('id_template', 'numbered', 'plain_lines'):
+        raise ValueError('รูปแบบส่งออก TXT ไม่ถูกต้อง')
+    content = str(d['text']) if 'text' in d and d['text'] is not None else export_source_script(pages, mode)
+    stem = Path(project_name(key)).stem or 'manhwa'
+    default_name = f'{stem}_ocr.txt'
+    if d.get('path'):
+        dest = Path(d['path'])
+    else:
+        dest = _pick_save_path(default_name, [('Text file', '*.txt')], title='บันทึกไฟล์ส่งออก TXT')
+    if dest is None:
+        return dict(cancelled=True)
+    if dest.suffix.lower() != '.txt':
+        dest = dest.with_suffix('.txt')
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(content if content.endswith('\n') else content + '\n', encoding='utf-8')
+    resolved = str(dest.resolve())
+    return dict(cancelled=False, path=resolved, filename=dest.name, note=f'บันทึก TXT แล้ว: {resolved}')
+
+
+@app.post('/api/{key}/save-json')
+def save_json_project(key: str, d: dict | None = None):
+    d = d or {}
+    with lock:
+        pages, masks = load(key)
+        title = project_name(key)
+        stem = Path(title).stem or 'manhwa_project'
+        existing = project_json_path(key)
+        save_as = bool(d.get('save_as'))
+        if d.get('path'):
+            dest = Path(d['path'])
+        elif existing and not save_as:
+            dest = Path(existing)
+        else:
+            initial_dir = str(Path(existing).parent) if existing else ''
+            default_name = Path(existing).name if existing else f'{stem}.json'
+            dest = _pick_save_path(
+                default_name,
+                [('Manhwa OCR Project', '*.json')],
+                title='บันทึกโปรเจกต์ (.json)',
+                initial_dir=initial_dir,
+            )
+        if dest is None:
+            return dict(cancelled=True)
+        resolved = _write_json_project_file(dest, pages, masks, title)
+        save(key, title, pages, masks, json_path=str(resolved))
+        return dict(
+            cancelled=False,
+            path=str(resolved),
+            filename=resolved.name,
+            note=f'บันทึก JSON แล้ว ({resolved.name})',
+        )
+
+
 @app.post('/api/{key}/txt/import')
 def import_txt(key: str, d: dict):
     with lock:
@@ -687,6 +980,15 @@ def action(key: str, n: int, action: str, d: dict):
         return dict(page=summary(p), note=note, **extra_out)
 
 
+def _unique_path(folder: Path, stem: str, suffix: str) -> Path:
+    candidate = folder / f'{stem}{suffix}'
+    idx = 1
+    while candidate.exists():
+        candidate = folder / f'{stem}_{idx}{suffix}'
+        idx += 1
+    return candidate
+
+
 @app.post('/api/{key}/export')
 def export(key: str, d: dict):
     from photoshop_export import export_psd
@@ -696,9 +998,15 @@ def export(key: str, d: dict):
     if fmt not in ('psd', 'mtp', 'all') or d.get('backend') not in ('photoshop', 'photopea'):
         raise ValueError('ตัวเลือกส่งออกไม่ถูกต้อง')
     job = uuid.uuid4().hex
-    folder = ROOT / key / 'exports' / job
-    folder.mkdir(parents=True)
-    progress = jobs[job] = dict(done=False, value=0, files=[], folder=str(folder))
+    dest_dir = str(d.get('destination') or '').strip()
+    if dest_dir:
+        folder = Path(dest_dir).resolve()
+        folder.mkdir(parents=True, exist_ok=True)
+    else:
+        folder = ROOT / key / 'exports' / job
+        folder.mkdir(parents=True)
+    stem = Path(project_name(key)).stem or 'project'
+    progress = jobs[job] = dict(done=False, value=0, files=[], paths=[], folder=str(folder))
 
     def run():
         try:
@@ -710,15 +1018,16 @@ def export(key: str, d: dict):
                 if fmt != 'mtp':
                     visible = copy.copy(p)
                     visible.bubbles = [b for b in p.bubbles if not b.text_layer.get('hidden')]
-                    out = folder / f'{i:02}.psd'
+                    out = _unique_path(folder, f'{i:02}', '.psd')
                     export_psd(core.load_image(p.path), visible, out, backend=d['backend'])
                     files.append(out)
                 progress['value'] = int(i * 80 / len(pages))
             if fmt != 'psd':
-                out = folder / 'project.mtp'
+                out = _unique_path(folder, stem if dest_dir else 'project', '.mtp')
                 core.write_mtp(out, pages, {}, cancel, lambda _: None)
                 files.append(out)
             progress['files'] = [f.name for f in files]
+            progress['paths'] = [str(f.resolve()) for f in files]
             if d.get('drive'):
                 import gdrive_sync as drive
 
@@ -768,15 +1077,18 @@ def main():
         if not server.started:
             raise RuntimeError('เปิดบริการ localhost ไม่สำเร็จ')
         try:
+            global main_window
             import webview
 
-            webview.create_window('Manhwa OCR Editor 4.0', url, width=1440, height=900, maximized=True)
+            main_window = webview.create_window('Manhwa OCR Editor 4.0', url, width=1440, height=900, maximized=True)
             webview.start()
         except Exception:
+            main_window = None
             print(url, flush=True)
             webbrowser.open(url)
             thread.join()
         finally:
+            main_window = None
             server.should_exit = True
             thread.join(5)
 

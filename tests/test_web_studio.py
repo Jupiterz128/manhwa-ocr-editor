@@ -229,6 +229,99 @@ class StudioPersistenceTests(unittest.TestCase):
             self.assertIn('2 หน้า', rc['note'])
             self.assertTrue(all(pg['clean'] for pg in rc['pages']))
 
+    def test_json_save_reload_and_txt_save_as_and_export_destination(self):
+        from fastapi.testclient import TestClient
+
+        im, b = fixtures.styled_fixture()
+        with tempfile.TemporaryDirectory() as tmp, patch.object(studio, 'ROOT', Path(tmp) / 'store'):
+            root = Path(tmp)
+            source = root / 'ep01.png'
+            im.save(source)
+            studio.save('savejob', 'ep01.png', [Page(str(source), [b])], {})
+            studio.action('savejob', 0, 'edit', {
+                'id': b.id, 'box': [120, 90, 410, 200], 'font_size': 38, 'rotation': 7,
+                'color': [12, 180, 99], 'alignment': 'left',
+            })
+            studio.action('savejob', 0, 'paint', {'id': b.id, 'points': [[180, 130], [220, 140]], 'radius': 10})
+            studio.action('savejob', 0, 'clean', {'id': b.id})
+
+            # 1) First Ctrl+S opens Save As dialog and remembers json_path
+            json1 = root / 'saved' / 'ep01.json'
+            with patch.object(studio, '_pick_save_path', return_value=json1) as picker:
+                r1 = studio.save_json_project('savejob', {'save_as': False})
+            picker.assert_called_once()
+            self.assertFalse(r1['cancelled'])
+            self.assertTrue(json1.is_file())
+            self.assertEqual(studio.state('savejob')['json_path'], str(json1.resolve()))
+
+            # 2) Second Ctrl+S overwrites directly without re-opening Save As dialog
+            studio.action('savejob', 0, 'edit', {'id': b.id, 'translation': 'คำแปลอัปเดตรอบสอง'})
+            with patch.object(studio, '_pick_save_path', side_effect=AssertionError('Must not re-prompt')) as picker2:
+                r2 = studio.save_json_project('savejob', {'save_as': False})
+            picker2.assert_not_called()
+            self.assertIn('ep01.json', r2['note'])
+
+            # 3) Ctrl+Shift+S (Save As) opens dialog for a new file path
+            json2 = root / 'saved' / 'ep01_copy.json'
+            with patch.object(studio, '_pick_save_path', return_value=json2) as picker3:
+                r3 = studio.save_json_project('savejob', {'save_as': True})
+            picker3.assert_called_once()
+            self.assertTrue(json2.is_file())
+            self.assertEqual(studio.state('savejob')['json_path'], str(json2.resolve()))
+
+            # 4) Reopen JSON via open_json_project -> verify ALL fields restored
+            opened = studio.open_json_project({'path': str(json2)})
+            self.assertFalse(opened['cancelled'])
+            reloaded_pages, reloaded_masks = studio.load(opened['key'])
+            rb = reloaded_pages[0].bubbles[0]
+            self.assertEqual(rb.translation, 'คำแปลอัปเดตรอบสอง')
+            self.assertEqual(rb.text_layer['color'], [12, 180, 99])
+            self.assertEqual(rb.text_layer['font_size'], 38)
+            self.assertEqual(rb.text_layer['rotation'], 7)
+            self.assertEqual(rb.text_layer['alignment'], 'left')
+            self.assertTrue(rb.text_layer['stroke']['enabled'])
+            self.assertTrue(rb.text_layer['gradient']['enabled'])
+            self.assertEqual(len(reloaded_pages[0].clean_patches), 1)
+            self.assertTrue(reloaded_masks[rb.id]['manual_edited'])
+
+            # 5) Reopen JSON via file upload (/api/projects) too
+            client = TestClient(studio.app)
+            hdr = {'x-studio': 'editor'}
+            with json2.open('rb') as f:
+                up = client.post('/api/projects', files=[('files', ('ep01_copy.json', f, 'application/json'))], headers=hdr)
+            self.assertEqual(up.status_code, 200, up.text)
+            up_pages, _ = studio.load(up.json())
+            self.assertEqual(up_pages[0].bubbles[0].translation, 'คำแปลอัปเดตรอบสอง')
+
+            # 6) Save _ocr.txt via Save As dialog
+            txt_out = root / 'exports' / 'ep01_ocr.txt'
+            with patch.object(studio, '_pick_save_path', return_value=txt_out) as txt_picker:
+                rt = studio.save_txt_file('savejob', {'mode': 'id_template'})
+            txt_picker.assert_called_once()
+            self.assertFalse(rt['cancelled'])
+            self.assertTrue(txt_out.is_file())
+            self.assertIn(b.id, txt_out.read_text(encoding='utf-8'))
+
+            # 7) Export MTP to custom chosen destination folder
+            exp_dir = root / 'custom_export'
+            job_id = studio.export('savejob', {'backend': 'photopea', 'format': 'mtp', 'destination': str(exp_dir)})
+            for _ in range(100):
+                prog = studio.progress(job_id)
+                if prog['done']:
+                    break
+                time.sleep(0.05)
+            self.assertTrue(prog['done'])
+            self.assertNotIn('error', prog)
+            self.assertTrue((exp_dir / 'ep01.mtp').is_file())
+            self.assertEqual(prog['paths'], [str((exp_dir / 'ep01.mtp').resolve())])
+
+            # 8) Reveal in Windows Explorer uses /select,<path>
+            with patch('web_api.subprocess.Popen') as popen:
+                rv = studio.reveal_path({'path': str(txt_out)})
+            self.assertTrue(rv['ok'])
+            if os.name == 'nt':
+                popen.assert_called_once_with(['explorer', f'/select,{str(txt_out.resolve())}'])
+
     @unittest.skipUnless(os.environ.get('TEST_STUDIO_BROWSER') == '1', 'opt-in browser and Photopea integration')
     def test_browser_transform_and_export_at_desktop_scaling(self):
         import uvicorn
@@ -341,12 +434,29 @@ class StudioPersistenceTests(unittest.TestCase):
                                 tab.keyboard.press('Delete')
                                 tab.wait_for_function(f"() => document.querySelectorAll('.bubble').length === {count_before}")
 
-                                # Test TXT Modal (T): switch format
+                                # Test Ctrl+K Command Palette has JSON save shortcut & Ctrl+S saves JSON + shows Toast with เปิดโฟลเดอร์
+                                tab.keyboard.press('Control+k')
+                                tab.locator('#modal .pal-item').first.wait_for(state='visible')
+                                self.assertIn('บันทึกโปรเจกต์ JSON', tab.locator('#modal').text_content())
+                                tab.locator('#close').click()
+                                json_out = root / f'saved_{int(ratio * 100)}.json'
+                                with patch.object(studio, '_pick_save_path', return_value=json_out):
+                                    tab.keyboard.press('Control+s')
+                                    tab.wait_for_function("() => document.getElementById('notice').textContent.includes('บันทึก JSON แล้ว')", timeout=15000)
+                                self.assertTrue(json_out.is_file())
+                                self.assertTrue(tab.locator('#notice .btn-reveal').is_visible())
+
+                                # Test TXT Modal (T): switch format & Save _ocr.txt via Save As
                                 tab.keyboard.press('t')
                                 tab.locator('#txtArea').wait_for()
                                 tab.locator('#txtMode').select_option('numbered')
                                 tab.wait_for_timeout(250)
                                 self.assertIn('1.', tab.locator('#txtArea').input_value())
+                                txt_saved = root / f'saved_{int(ratio * 100)}_ocr.txt'
+                                with patch.object(studio, '_pick_save_path', return_value=txt_saved):
+                                    tab.locator('#modal button', has_text='บันทึก _ocr.txt').click()
+                                    tab.wait_for_function("() => document.getElementById('notice').textContent.includes('บันทึก TXT แล้ว')", timeout=15000)
+                                self.assertTrue(txt_saved.is_file())
                                 tab.locator('#close').click()
 
                                 # Test Mask Edit Mode (M) -> paint -> Preview -> ตกลง

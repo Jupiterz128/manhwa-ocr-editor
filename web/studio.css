@@ -166,7 +166,15 @@ dialog::backdrop{background:rgba(0,0,0,.65)}
 .txt-area{min-height:260px;font:12.5px "JetBrains Mono",Consolas,"Noto Sans Thai",monospace;margin:8px 0}
 .txt-bar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:6px}
 .txt-bar select{width:auto;min-width:150px}
-#notice{position:fixed;bottom:6px;left:10px;padding:3px 8px;border-radius:5px;border:1px solid var(--border);background:#16181df2;color:#dadcef;font-size:12.5px;max-width:85vw;z-index:20}
+#notice{position:fixed;bottom:10px;left:12px;display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:7px;border:1px solid rgba(255,255,255,.14);background:#141722f5;color:#e8eaf6;font-size:12.5px;max-width:min(86vw,780px);box-shadow:0 8px 24px rgba(0,0,0,.55);z-index:30}
+#notice span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.btn-reveal{background:rgba(56,189,248,.18);border-color:rgba(56,189,248,.4);color:var(--sky-soft);font-weight:500}
+.btn-reveal:hover{background:rgba(56,189,248,.3);border-color:rgba(56,189,248,.65);color:#E0F2FE}
+.toast-close{padding:1px 6px;background:transparent;border-color:transparent;color:var(--muted)}
+.toast-close:hover{background:rgba(255,255,255,.08);color:#fff}
+.export-dir-row{display:flex;align-items:center;gap:6px;margin:4px 0 8px}
+.export-dir-row input{flex:1;min-width:0;font:12px "JetBrains Mono",Consolas,monospace;color:#cbd5e1}
+.export-dir-row button{flex:0 0 auto}
 #notice:empty,[hidden],#left[hidden]{display:none}
 a{color:var(--indigo-soft)}
 @media(max-width:1360px){#projectName{display:none}header{gap:4px}}
