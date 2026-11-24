@@ -238,6 +238,8 @@ class CanvasUXBrowserTests(unittest.TestCase):
                         self.assertEqual([u for u in reqs if '/edit' in u], [], f'Unexpected /edit fetch on layer switch: {reqs}')
 
                         # Test Drag Grip (⋮⋮) moves Contextual Task Bar smoothly at 60fps
+                        tab.wait_for_timeout(40)
+                        before_drag_bb = text_bar.bounding_box()
                         grip_bb = tab.locator('#textBarGrip').bounding_box()
                         tab.mouse.move(grip_bb['x'] + 4, grip_bb['y'] + 4)
                         tab.mouse.down()
@@ -245,7 +247,7 @@ class CanvasUXBrowserTests(unittest.TestCase):
                         tab.mouse.up()
                         tab.wait_for_timeout(40)
                         dragged_bb = text_bar.bounding_box()
-                        self.assertGreater(abs(dragged_bb['x'] - bar_bb['x']), 40)
+                        self.assertGreater(abs(dragged_bb['x'] - before_drag_bb['x']), 40)
 
                         # Switch to B01 -> re-anchors under B01
                         tab.locator('#layers .layer-main').nth(0).click()

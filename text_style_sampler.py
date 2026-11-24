@@ -6,28 +6,130 @@ from PIL import Image, ImageOps
 
 DEFAULTS = {
     'stroke': {'enabled': False, 'color': [255, 255, 255], 'size': 3},
-    'gradient': {'enabled': False, 'start_color': [255, 255, 255],
-                 'end_color': [200, 200, 200], 'angle': 90},
+    'gradient': {
+        'enabled': False,
+        'start_color': [255, 255, 255],
+        'end_color': [200, 200, 200],
+        'stops': [
+            {'pos': 0, 'color': '#FFFFFF'},
+            {'pos': 100, 'color': '#C8C8C8'},
+        ],
+        'angle': 90,
+        'scale': 100,
+        'opacity': 100,
+        'reverse': False,
+        'style': 'linear',
+        'blend_mode': 'normal',
+        'align_with_layer': True,
+    },
 }
+
+GRADIENT_STYLES = ('linear', 'radial', 'reflected')
+GRADIENT_BLEND_MODES = ('normal', 'multiply', 'screen', 'overlay')
+
+
+def _rgb_to_hex(rgb):
+    return '#' + ''.join(f'{max(0, min(255, int(round(c)))):02X}' for c in rgb[:3])
+
+
+def _parse_color_rgb(val):
+    if isinstance(val, (tuple, list)) and len(val) == 3 and all(
+        isinstance(n, (int, float)) and not isinstance(n, bool) and 0 <= n <= 255 for n in val
+    ):
+        return [int(round(n)) for n in val]
+    if isinstance(val, str):
+        s = val.strip().lstrip('#')
+        if len(s) == 3:
+            s = ''.join(ch * 2 for ch in s)
+        if len(s) == 6:
+            try:
+                return [int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16)]
+            except ValueError:
+                return None
+    return None
+
+
+def _normalize_stops(raw_stops, fallback_start, fallback_end):
+    cleaned = []
+    if isinstance(raw_stops, (list, tuple)):
+        for item in raw_stops:
+            if not isinstance(item, dict):
+                continue
+            pos = item.get('pos')
+            if isinstance(pos, bool) or not isinstance(pos, (int, float)):
+                continue
+            rgb = _parse_color_rgb(item.get('color'))
+            if rgb is None:
+                continue
+            p = max(0.0, min(100.0, float(pos)))
+            p_clean = int(round(p)) if abs(p - round(p)) < 1e-6 else round(p, 2)
+            cleaned.append({'pos': p_clean, 'color': _rgb_to_hex(rgb)})
+    if len(cleaned) < 2:
+        return [
+            {'pos': 0, 'color': _rgb_to_hex(fallback_start)},
+            {'pos': 100, 'color': _rgb_to_hex(fallback_end)},
+        ]
+    cleaned.sort(key=lambda s: float(s['pos']))
+    return cleaned[:24]
 
 
 def effects(layer=None):
     style = copy.deepcopy(DEFAULTS)
-    for key, default in style.items():
-        supplied = (layer or {}).get(key, {})
-        if not isinstance(supplied, dict):
-            continue
-        for field, value in default.items():
-            v = supplied.get(field, value)
-            if field == 'enabled':
-                default[field] = v is True
-            elif isinstance(value, list):
-                if isinstance(v, (tuple, list)) and len(v)==3 and all(type(n) is int and 0<=n<=255 for n in v):
-                    default[field] = list(v)
-            elif field == 'size' and type(v) is int:
-                default[field] = max(1, min(8, v))
-            elif field == 'angle' and v in (0, 45, 90, 135):
-                default[field] = int(v)
+    src = layer or {}
+    # Stroke
+    s_in = src.get('stroke', {})
+    if isinstance(s_in, dict):
+        st = style['stroke']
+        st['enabled'] = s_in.get('enabled', st['enabled']) is True
+        col = _parse_color_rgb(s_in.get('color'))
+        if col is not None:
+            st['color'] = col
+        sz = s_in.get('size')
+        if isinstance(sz, int) and not isinstance(sz, bool):
+            st['size'] = max(1, min(8, sz))
+
+    # Gradient Overlay (backwards-compatible with start_color/end_color + full Photoshop Classic multi-stop)
+    g_in = src.get('gradient', {})
+    if isinstance(g_in, dict):
+        gd = style['gradient']
+        gd['enabled'] = g_in.get('enabled', gd['enabled']) is True
+        sc = _parse_color_rgb(g_in.get('start_color'))
+        ec = _parse_color_rgb(g_in.get('end_color'))
+        if sc is not None:
+            gd['start_color'] = sc
+        if ec is not None:
+            gd['end_color'] = ec
+        raw_stops = g_in.get('stops')
+        if isinstance(raw_stops, (list, tuple)) and len(raw_stops) >= 2:
+            gd['stops'] = _normalize_stops(raw_stops, gd['start_color'], gd['end_color'])
+            gd['start_color'] = _parse_color_rgb(gd['stops'][0]['color']) or gd['start_color']
+            gd['end_color'] = _parse_color_rgb(gd['stops'][-1]['color']) or gd['end_color']
+        else:
+            gd['stops'] = _normalize_stops(None, gd['start_color'], gd['end_color'])
+        ang = g_in.get('angle')
+        if isinstance(ang, (int, float)) and not isinstance(ang, bool) and np.isfinite(ang):
+            a = float(ang)
+            while a > 180:
+                a -= 360
+            while a < -180:
+                a += 360
+            gd['angle'] = int(round(a))
+        scl = g_in.get('scale')
+        if isinstance(scl, (int, float)) and not isinstance(scl, bool) and np.isfinite(scl):
+            gd['scale'] = max(10, min(150, int(round(float(scl)))))
+        opct = g_in.get('opacity')
+        if isinstance(opct, (int, float)) and not isinstance(opct, bool) and np.isfinite(opct):
+            gd['opacity'] = max(0, min(100, int(round(float(opct)))))
+        if 'reverse' in g_in:
+            gd['reverse'] = g_in.get('reverse') is True
+        gst = str(g_in.get('style') or '').strip().lower()
+        if gst in GRADIENT_STYLES:
+            gd['style'] = gst
+        bm = str(g_in.get('blend_mode') or '').strip().lower()
+        if bm in GRADIENT_BLEND_MODES:
+            gd['blend_mode'] = bm
+        if 'align_with_layer' in g_in:
+            gd['align_with_layer'] = g_in.get('align_with_layer') is not False
     return style
 
 
@@ -124,7 +226,13 @@ def sample_style(orig, cleaned, bubble, *, include_color=False):
         residual=colors-(colors.mean(axis=0)+(pos-pos.mean())[:,None]*slope)
         if np.percentile(np.linalg.norm(residual,axis=1),85)>max(5,length*.15):continue
         ends=[np.median(rgb[core][v],axis=0).astype(int).tolist() for v in (pos<=.10,pos>=.90)]
-        style['gradient'].update(enabled=True,start_color=ends[0],end_color=ends[1],angle=angle)
+        style['gradient'].update(
+            enabled=True,
+            start_color=ends[0],
+            end_color=ends[1],
+            stops=[{'pos': 0, 'color': _rgb_to_hex(ends[0])}, {'pos': 100, 'color': _rgb_to_hex(ends[1])}],
+            angle=angle,
+        )
         strongest=length
     return style
 
@@ -136,12 +244,45 @@ def styled_tile(tile, layer):
         w,h=tile.size
         angle=np.deg2rad(grad['angle'])
         y,x=np.ogrid[:h,:w]
-        axis=x*np.cos(angle)-y*np.sin(angle)
-        t=((axis-axis.min())/max(1,np.ptp(axis)))[:,:,None]
-        if grad['angle']==135:
-            t=1-t
-        colors=(1-t)*np.array(grad['start_color'])+t*np.array(grad['end_color'])
-        fill=Image.fromarray(np.broadcast_to(colors,(h,w,3)).round().astype('uint8'))
+        gstyle=grad.get('style','linear')
+        scale=max(0.1, float(grad.get('scale',100))/100.0)
+        if gstyle=='radial':
+            cx,cy=(w-1)/2.0,(h-1)/2.0
+            rad=max(1.0, np.hypot(cx,cy))
+            t=np.hypot(x-cx,y-cy)/(rad*scale)
+            t=np.clip(t,0.0,1.0)
+        else:
+            axis=x*np.cos(angle)-y*np.sin(angle)
+            t=(axis-axis.min())/max(1.0,float(np.ptp(axis)))
+            if gstyle=='reflected':
+                t=np.abs(t-0.5)*2.0/scale
+            else:
+                t=0.5+(t-0.5)/scale
+            t=np.clip(t,0.0,1.0)
+        if grad.get('reverse'):
+            t=1.0-t
+        stops=grad.get('stops') or [
+            {'pos':0,'color':_rgb_to_hex(grad['start_color'])},
+            {'pos':100,'color':_rgb_to_hex(grad['end_color'])},
+        ]
+        s_pos=np.array([float(s['pos'])/100.0 for s in stops],dtype=np.float32)
+        s_rgb=np.array([_parse_color_rgb(s['color']) or [255,255,255] for s in stops],dtype=np.float32)
+        flat=t.ravel().astype(np.float32)
+        grad_rgb=np.stack([np.interp(flat,s_pos,s_rgb[:,ch]) for ch in range(3)],axis=-1).reshape(h,w,3)
+        base_rgb=np.asarray(tile.convert('RGB'),dtype=np.float32)
+        bmode=grad.get('blend_mode','normal')
+        if bmode=='multiply':
+            blended=(base_rgb/255.0)*(grad_rgb/255.0)*255.0
+        elif bmode=='screen':
+            blended=(1.0-(1.0-base_rgb/255.0)*(1.0-grad_rgb/255.0))*255.0
+        elif bmode=='overlay':
+            bn,gn=base_rgb/255.0,grad_rgb/255.0
+            blended=np.where(bn<0.5,2.0*bn*gn,1.0-2.0*(1.0-bn)*(1.0-gn))*255.0
+        else:
+            blended=grad_rgb
+        opct=max(0.0,min(1.0,float(grad.get('opacity',100))/100.0))
+        colors=base_rgb*(1.0-opct)+blended*opct
+        fill=Image.fromarray(np.clip(colors,0,255).round().astype('uint8'))
         fill.putalpha(tile.getchannel('A'))
         tile=fill
     if stroke['enabled']:

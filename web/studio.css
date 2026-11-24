@@ -190,6 +190,55 @@ small,p{color:var(--muted)}
 #tbSize:focus{background:var(--card);border-color:var(--primary);outline:none}
 #tbSize::-webkit-inner-spin-button,#tbSize::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
 .tb-unit{font:11px "JetBrains Mono",Consolas,monospace;color:var(--muted);padding-right:3px;user-select:none}
+.fx-grad-row{display:flex;align-items:center;gap:6px;margin:8px 0}
+.fx-grad-row>input[type=checkbox]{flex:0 0 auto;width:15px;height:15px;margin:0;cursor:pointer;accent-color:var(--primary)}
+.fx-grad-btn{flex:1 1 auto;min-width:0;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:5px 8px;background:var(--card);border:1px solid var(--border);border-radius:7px;color:#e5e7eb;text-align:left}
+.fx-grad-btn:hover{background:#1f222c;border-color:rgba(94,106,210,.55)}
+.fx-grad-label{font-size:12.5px;white-space:nowrap}
+.fx-grad-swatch{flex:1 1 auto;min-width:64px;height:16px;border-radius:4px;border:1px solid rgba(255,255,255,.18);box-shadow:inset 0 0 0 1px rgba(0,0,0,.35)}
+#gradModal{position:fixed;top:0;left:0;z-index:26;width:368px;max-width:calc(100vw - 16px);border:1px solid rgba(255,255,255,.15);border-radius:11px;background:rgba(15,16,20,.97);backdrop-filter:blur(12px);box-shadow:0 18px 48px rgba(0,0,0,.68);will-change:transform;visibility:hidden;opacity:0;pointer-events:none;overflow:hidden;user-select:none}
+#gradModal.visible{visibility:visible;opacity:1;pointer-events:auto}
+.gm-head{display:flex;align-items:center;justify-content:space-between;padding:9px 12px;background:#161820;border-bottom:1px solid var(--border);cursor:grab;touch-action:none}
+.gm-head:active{cursor:grabbing}
+.gm-title{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;color:#f1f5f9;letter-spacing:.01em}
+.gm-grip{font-style:normal;letter-spacing:-2px;color:var(--muted)}
+.gm-close{width:24px;height:24px;padding:0;line-height:1;background:transparent;border-color:transparent;color:var(--muted);font-size:16px}
+.gm-close:hover{background:rgba(255,255,255,.08);color:#fff}
+.gm-body{padding:12px 14px;display:flex;flex-direction:column;gap:10px}
+.gm-row{display:grid;grid-template-columns:86px minmax(0,1fr);align-items:center;gap:8px}
+.gm-lbl{margin:0;color:#aeb4c0;font-size:12px;text-align:right;white-space:nowrap}
+.gm-ctrl{height:28px;padding:3px 7px;font-size:12px}
+.gm-slider-wrap{display:flex;align-items:center;gap:7px;min-width:0}
+.gm-slider-wrap input[type=range],.gm-angle-wrap input[type=range]{flex:1 1 auto;min-width:0;padding:0;border:0;background:transparent;height:20px;cursor:pointer}
+.gm-slider-wrap input[type=number],.gm-angle-wrap input[type=number],.gm-stop-pos-lbl input[type=number]{width:54px;flex:0 0 54px;height:26px;padding:2px 5px;text-align:right;font:600 11.5px "JetBrains Mono",Consolas,monospace}
+.gm-unit{font:11px "JetBrains Mono",Consolas,monospace;color:var(--muted);flex:0 0 auto}
+.gm-check{display:inline-flex;align-items:center;gap:6px;margin:0;color:#d6dae2;font-size:12px;cursor:pointer}
+.gm-check input[type=checkbox]{width:14px;height:14px;margin:0;accent-color:var(--primary);cursor:pointer}
+.gm-grad-sec{padding:9px 10px 8px;border:1px solid var(--border);border-radius:8px;background:#111319;display:flex;flex-direction:column;gap:7px}
+.gm-grad-top{display:flex;align-items:center;justify-content:space-between}
+.gm-grad-top .gm-lbl{text-align:left;font-weight:600;color:#d8dce4}
+.gm-bar-wrap{position:relative;padding-bottom:22px}
+.gm-bar{height:28px;border-radius:6px;border:1px solid rgba(255,255,255,.2);cursor:crosshair;box-shadow:inset 0 0 0 1px rgba(0,0,0,.45);background-color:#222}
+.gm-stops{position:absolute;left:0;right:0;top:28px;height:22px;cursor:crosshair}
+.gm-stop{position:absolute;top:2px;width:14px;height:18px;padding:0;margin:0;transform:translateX(-50%);background:transparent;border:0;cursor:ew-resize;touch-action:none}
+.gm-stop:hover,.gm-stop:focus-visible{background:transparent;border:0;outline:none}
+.gm-stop::before{content:"";position:absolute;top:0;left:50%;transform:translateX(-50%);border-left:5px solid transparent;border-right:5px solid transparent;border-bottom:5px solid #9ca3af}
+.gm-stop::after{content:"";position:absolute;top:5px;left:1px;width:12px;height:12px;border-radius:2px;background:var(--stop-color,#fff);border:1.5px solid #9ca3af;box-shadow:0 1px 3px rgba(0,0,0,.75)}
+.gm-stop.selected::before{border-bottom-color:#fff}
+.gm-stop.selected::after{border-color:#fff;box-shadow:0 0 0 2px var(--primary),0 2px 6px rgba(0,0,0,.85)}
+.gm-stop-tools{display:flex;align-items:center;gap:8px;margin-top:2px}
+.gm-stop-color-lbl,.gm-stop-pos-lbl{display:inline-flex;align-items:center;gap:5px;margin:0;font-size:12px;color:#b9bbc5}
+.gm-stop-color-lbl input[type=color]{width:34px;min-width:34px;height:26px;padding:2px;cursor:pointer}
+.gm-stop-tools .icon-danger{margin-left:auto}
+.gm-stop-tools .icon-danger:disabled{opacity:.3;cursor:not-allowed}
+.gm-hint{font-size:10.5px;color:var(--muted);line-height:1.3}
+.gm-angle-wrap{display:flex;align-items:center;gap:8px;min-width:0}
+.gm-dial{position:relative;flex:0 0 38px;width:38px;height:38px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#242834,#12141b);border:1.5px solid rgba(255,255,255,.22);box-shadow:inset 0 1px 3px rgba(0,0,0,.7);cursor:pointer;touch-action:none}
+.gm-dial:hover{border-color:var(--primary)}
+.gm-dial-needle{position:absolute;left:50%;top:50%;width:15px;height:2px;margin-top:-1px;background:#e0e7ff;border-radius:2px;transform-origin:0 50%;pointer-events:none;box-shadow:0 0 4px rgba(94,106,210,.7)}
+.gm-dial-dot{position:absolute;left:50%;top:50%;width:5px;height:5px;border-radius:50%;background:#fff;transform:translate(-50%,-50%);pointer-events:none}
+.gm-foot{display:flex;justify-content:flex-end;gap:8px;padding:10px 14px;background:#12141a;border-top:1px solid var(--border)}
+.gm-foot button{min-width:74px;padding:5px 12px}
 @media(prefers-reduced-motion:reduce){#cleanPanel,#cleanPanel.reanchor{transition:none}}
 #maskToggle{width:100%;margin-top:6px}
 .insp-head{padding:6px 8px;margin-bottom:6px;border:1px solid var(--border);border-radius:7px;background:var(--card)}
