@@ -7,6 +7,7 @@ import os
 import shutil
 import socket
 import sqlite3
+import sys
 import subprocess
 import threading
 import uuid
@@ -24,8 +25,10 @@ from PIL import Image
 import uvicorn
 
 import manhwa_ocr as core
+from sound_effects import SoundEffects
+sounds=SoundEffects()
 from bubble_cleaner import Cleaner, compose_page, prepare_region, encode_region, decode_region, encode_patch
-from clean_quality import clean_checked
+from clean_quality import clean_checked, quality_note
 from text_layout import (
     DEFAULT_FONT_PRESETS,
     FONT_CHOICES,
@@ -658,16 +661,30 @@ def find(pages, n, bid):
     raise HTTPException(404, 'ไม่พบกรอบ')
 
 
-def _paint_on_region(reg, points, radius, erase=False):
-    pts = np.asarray(points, np.int32).reshape(-1, 2) - np.asarray(reg.box[:2], np.int32)
-    r = max(1, min(128, int(radius)))
-    value = 0 if erase else 255
-    if len(pts):
-        cv2.polylines(reg.mask, [pts], False, value, 2 * r)
-        for pt in (pts[0], pts[-1]):
-            cv2.circle(reg.mask, (int(pt[0]), int(pt[1])), r, value, -1)
-    reg.mask[reg.safe == 0] = 0
-    reg.manual_edited = True
+def _paint_on_region(reg, points, radius, erase=False, source=None):
+    pts=np.asarray(points,np.int32).reshape(-1,2)
+    if not len(pts):return
+    r=max(1,min(128,int(radius)))
+    if source is not None and not erase:
+        x,y,right,bottom=reg.box
+        lo=pts.min(axis=0)-r
+        hi=pts.max(axis=0)+r+1
+        box=[max(0,min(x,int(lo[0]))),max(0,min(y,int(lo[1]))),
+             min(source.width,max(right,int(hi[0]))),min(source.height,max(bottom,int(hi[1])))]
+        if box!=reg.box:
+            padding=((y-box[1],box[3]-bottom),(x-box[0],box[2]-right))
+            reg.mask=np.pad(reg.mask,padding)
+            reg.safe=np.pad(reg.safe,padding)
+            reg.box=box
+            reg.image=source.crop(tuple(box))
+    pts=pts-np.asarray(reg.box[:2],np.int32)
+    def stroke(mask,value):
+        cv2.polylines(mask,[pts],False,value,2*r)
+        for pt in (pts[0],pts[-1]):cv2.circle(mask,tuple(pt),r,value,-1)
+    stroke(reg.mask,0 if erase else 255)
+    if source is not None and not erase:stroke(reg.safe,255)
+    reg.mask[reg.safe==0]=0
+    reg.manual_edited=True
 
 
 def _overlay_mask(im, reg):
@@ -691,7 +708,7 @@ def image(key: str, n: int, view: str = 'original', bid: str = ''):
         for b in page.bubbles:
             reg = decode_region(masks[b.id]) if b.id in masks else prepare_region(im, b)
             im.paste((109, 85, 240), reg.box, Image.fromarray((reg.mask * 0.55).astype('uint8')))
-    elif view == 'mask_draft' and bid:
+    elif view in ('mask_base','mask_alpha','mask_draft') and bid:
         other = [pt for pt in page.clean_patches if pt.get('bubble_id') != bid]
         base = compose_page(im, other) if other else im.copy()
         sess = mask_sessions.get((key, n, bid))
@@ -700,8 +717,14 @@ def image(key: str, n: int, view: str = 'original', bid: str = ''):
         else:
             _, b = find(pages, n, bid)
             reg = decode_region(masks[b.id]) if b.id in masks else prepare_region(im, b)
-        _overlay_mask(base, reg)
-        im = base
+        if view=='mask_alpha':
+            base=Image.new('RGBA',im.size)
+            overlay=Image.new('RGBA',reg.image.size,(139,92,246))
+            overlay.putalpha(Image.fromarray(reg.mask))
+            base.paste(overlay,reg.box[:2])
+        elif view=='mask_draft':
+            _overlay_mask(base,reg)
+        im=base
     elif view == 'mask_preview' and bid:
         other = [pt for pt in page.clean_patches if pt.get('bubble_id') != bid]
         sess = mask_sessions.get((key, n, bid))
@@ -961,7 +984,7 @@ def _get_or_init_mask_session(key, n, im, b, masks):
     sess = mask_sessions.get(skey)
     if sess is None:
         reg = decode_region(masks[b.id]) if b.id in masks else prepare_region(im, b)
-        sess = {'region': copy.deepcopy(reg), 'undo': [], 'preview_patch': None}
+        sess = {'region': reg, 'source':im, 'undo': [], 'preview_patch': None}
         mask_sessions[skey] = sess
     return sess
 
@@ -1150,12 +1173,25 @@ def batch_action(key: str, action: str, d: dict):
         else:
             raise ValueError('ไม่รองรับคำสั่งทุกหน้านี้')
         save(key, '', pages, masks)
+        sounds.play({'clean':'clean_all','ocr':'ocr_all','mask':'mask_all'}.get(action,''))
         return dict(pages=[summary(p) for p in pages], note=note)
 
 
 @app.post('/api/{key}/page/{n}/{action}')
 def action(key: str, n: int, action: str, d: dict):
     with lock:
+        if action=='mask_paint':
+            sess=mask_sessions.get((key,n,d.get('id')))
+            if not sess:raise ValueError('เปิดโหมดแก้ Mask ก่อนระบาย')
+            reg=sess['region']
+            previous=copy.copy(reg)
+            previous.mask=reg.mask.copy()
+            previous.safe=reg.safe.copy()
+            sess['undo'].append(previous)
+            del sess['undo'][:-12]
+            _paint_on_region(reg,d['points'],d['radius'],erase=bool(d.get('erase')),source=sess['source'])
+            sess['preview_patch']=None
+            return dict(has_preview=False,note='ปรับมาสก์แล้ว')
         pages, masks = load(key)
         p, b = find(pages, n, d.get('id'))
         targets = [b] if b else p.bubbles
@@ -1163,6 +1199,10 @@ def action(key: str, n: int, action: str, d: dict):
         note = ''
         extra_out = {}
         active_preset = str(d.get('font_preset') or project_font_preset(key))
+        if action=='pick_color' and b:
+            xy=[int(value) for value in d['point']]
+            if len(xy)!=2 or not (0<=xy[0]<im.width and 0<=xy[1]<im.height):raise ValueError('เลือกจุดภายในภาพ')
+            return dict(color=list(im.convert('RGB').getpixel(tuple(xy))))
         if action == 'edit' and b:
             text_update(im, p, b, d, font_preset=active_preset)
             if 'bubble_box' in d:
@@ -1198,9 +1238,15 @@ def action(key: str, n: int, action: str, d: dict):
             extra_out['score'] = sc
             note = f'RapidOCR ช่องนี้สำเร็จ ({round(sc * 100)}%)' if txt else 'RapidOCR ไม่พบข้อความในกรอบนี้'
         elif action == 'fx' and b and b.translation:
-            text_update(
-                im, p, b, {'style': sample_style(im, compose_page(im, p.clean_patches) if p.clean_patches else None, b)}
-            )
+            sampled=sample_style(im,compose_page(im,p.clean_patches) if p.clean_patches else None,b,include_color=True)
+            if 'color' not in sampled:
+                raise ValueError('ดูดสี Auto: แยกเนื้อตัวอักษรจากพื้นหลังไม่ได้')
+            color=sampled.pop('color')
+            text_update(im,p,b,{'style':sampled,'color':color})
+            number=p.bubbles.index(b)+1
+            stroke='เปิด' if sampled['stroke']['enabled'] else 'ปิด'
+            gradient='เปิด' if sampled['gradient']['enabled'] else 'ปิด'
+            note=f'ดูดสี Auto (B{number:02d}): สีหลัก #{bytes(color).hex().upper()} · Stroke: {stroke} · Gradient: {gradient}'
         elif action == 'ocr':
             if p.bubbles and not d.get('replace'):
                 raise ValueError('ยืนยันการอ่าน OCR ใหม่ก่อน')
@@ -1247,20 +1293,17 @@ def action(key: str, n: int, action: str, d: dict):
                 has_preview=False,
                 note='โหมดแก้ Mask รายช่อง — ระบายเพิ่ม/ลบ แล้วกด Preview เพื่อดูผลก่อนบันทึก',
             )
-        elif action == 'mask_paint' and b:
-            sess = _get_or_init_mask_session(key, n, im, b, masks)
-            reg = sess['region']
-            sess['undo'].append((reg.mask.copy(), bool(reg.manual_edited)))
+        elif action=='mask_rebuild' and b:
+            sess=_get_or_init_mask_session(key,n,im,b,masks)
+            sess['undo'].append(copy.deepcopy(sess['region']))
             del sess['undo'][:-12]
-            _paint_on_region(reg, d['points'], d['radius'], erase=bool(d.get('erase')))
-            sess['preview_patch'] = None
-            return dict(page=summary(p), has_preview=False, note='ปรับ Mask แล้ว — กด Preview เพื่อดูผลลัพธ์')
+            sess['region']=prepare_region(im,b,margin=max(0,min(96,int(d['margin']))),grow=max(0,min(32,int(d['grow']))))
+            sess['preview_patch']=None
+            return dict(note='สร้างมาสก์ร่างใหม่แล้ว')
         elif action == 'mask_undo' and b:
             sess = _get_or_init_mask_session(key, n, im, b, masks)
             if sess['undo']:
-                prev_mask, prev_edited = sess['undo'].pop()
-                sess['region'].mask = prev_mask
-                sess['region'].manual_edited = prev_edited
+                sess['region']=sess['undo'].pop()
                 sess['preview_patch'] = None
                 note = 'ย้อน Mask แล้ว'
             else:
@@ -1272,7 +1315,7 @@ def action(key: str, n: int, action: str, d: dict):
             cleaner = get_cleaner()
             verify = None if reg.manual_edited else _make_verifier(reg)
             repaired, mask, method, quality = clean_checked(
-                cleaner, reg, method=d.get('method', 'auto'), cancel=cancel, reader=verify
+                cleaner, reg, method=d.get('method', 'auto'), color=d.get('color'), cancel=cancel, reader=verify
             )
             patch = encode_patch(reg.box, repaired, mask, method, b.id)
             patch['quality'] = quality
@@ -1281,7 +1324,7 @@ def action(key: str, n: int, action: str, d: dict):
                 page=summary(p),
                 has_preview=True,
                 method=method,
-                note=f'Preview ({method}) พร้อมแล้ว — กด ตกลง เพื่อบันทึก หรือแก้ Mask เพิ่ม',
+                note=f'Preview ({method}) · '+quality_note(quality),
             )
         elif action == 'mask_apply' and b:
             sess = _get_or_init_mask_session(key, n, im, b, masks)
@@ -1291,7 +1334,7 @@ def action(key: str, n: int, action: str, d: dict):
                 cleaner = get_cleaner()
                 verify = None if reg.manual_edited else _make_verifier(reg)
                 repaired, mask, method, quality = clean_checked(
-                    cleaner, reg, method=d.get('method', 'auto'), cancel=cancel, reader=verify
+                    cleaner, reg, method=d.get('method', 'auto'), color=d.get('color'), cancel=cancel, reader=verify
                 )
                 patch = encode_patch(reg.box, repaired, mask, method, b.id)
                 patch['quality'] = quality
@@ -1330,6 +1373,30 @@ def _unique_path(folder: Path, stem: str, suffix: str) -> Path:
     return candidate
 
 
+@app.post('/api/{key}/legacy')
+def open_advanced(key:str):
+    pages,masks=load(key)
+    dest=ROOT/key/'advanced'/uuid.uuid4().hex/'project.json'
+    _write_json_project_file(dest,pages,masks,project_name(key),project_font_preset(key))
+    subprocess.Popen([sys.executable,str(Path(core.__file__)), '--project',str(dest)])
+    return dict(path=str(dest))
+
+
+@app.post('/api/{key}/stitch')
+def stitch_project(key:str,d:dict):
+    pages,masks=load(key)
+    child=uuid.uuid4().hex
+    drafts={(p.id,b.id):decode_region(masks[b.id]) for p in pages for b in p.bubbles if b.id in masks}
+    height=int(d.get('height',15000))
+    width=int(d.get('width',720))
+    if not 100<=width<=8192 or not 256<=height<=30000:raise ValueError('ขนาด SmartStitch อยู่นอกช่วงที่รองรับ')
+    result,regions,note=core.stitch_pages(pages,drafts,height,'User Customized Width',width,
+        'Smart Pixel Comparison',90,5,0,ROOT/child/'stitched_pages',cancel,lambda _:None,strict=True)
+    name=project_name(key)+' [stitched]'
+    save(child,name,result,{bid:encode_region(region) for (_,bid),region in regions.items()},font_preset=project_font_preset(key))
+    return dict(key=child,name=name,note=note)
+
+
 @app.post('/api/{key}/export')
 def export(key: str, d: dict):
     from photoshop_export import export_psd
@@ -1349,7 +1416,7 @@ def export(key: str, d: dict):
     stem = Path(project_name(key)).stem or 'project'
     active_preset = project_font_preset(key)
     preset_map = load_font_presets().get(active_preset) or DEFAULT_FONT_PRESETS['1. มังฮวาเกาหลี']
-    progress = jobs[job] = dict(done=False, value=0, files=[], paths=[], folder=str(folder))
+    progress = jobs[job] = dict(done=False, value=0, status='กำลังเตรียมไฟล์', files=[], paths=[], folder=str(folder))
 
     def run():
         try:
@@ -1362,12 +1429,17 @@ def export(key: str, d: dict):
                     visible = copy.copy(p)
                     visible.bubbles = [b for b in p.bubbles if not b.text_layer.get('hidden')]
                     out = _unique_path(folder, f'{i:02}', '.psd')
+                    progress['status']=f'กำลังส่งออกหน้า {i}/{len(pages)} ผ่าน {d["backend"]}…'
                     export_psd(core.load_image(p.path), visible, out, backend=d['backend'])
                     files.append(out)
-                progress['value'] = int(i * 80 / len(pages))
+                if fmt!='mtp':progress['value']=int(i*(80 if fmt=='all' else 95)/len(pages))
             if fmt != 'psd':
                 out = _unique_path(folder, stem if dest_dir else 'project', '.mtp')
-                core.write_mtp(out, pages, preset_map, cancel, lambda _: None)
+                progress['status']='กำลังบันทึก MTP…'
+                def update_mtp(event):
+                    if event[0]=='progress':progress['value']=int(float(event[1])*.95) if fmt=='mtp' else 80+int(float(event[1])*.15)
+                    elif event[0]=='log':progress['status']=str(event[1])
+                core.write_mtp(out,pages,preset_map,cancel,update_mtp)
                 try:
                     mtp_obj = json.loads(out.read_text(encoding='utf-8-sig'))
                     mtp_obj.setdefault('appSettings', {})['studioFontPreset'] = active_preset
@@ -1382,8 +1454,10 @@ def export(key: str, d: dict):
 
                 dest = drive.create_job_subfolder(drive.PSD_OUTPUT_FOLDER_ID, Path(pages[0].path).stem)
                 for f in files:
+                    progress['status']='กำลังอัปโหลด '+f.name
                     drive.upload_file_to_folder(f, dest)
-            progress['value'] = 100
+            progress.update(value=100,status='ส่งออกสำเร็จ')
+            if fmt!='mtp':sounds.play('psd')
         except Exception as exc:
             progress['error'] = str(exc)
         finally:

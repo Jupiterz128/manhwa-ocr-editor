@@ -3723,10 +3723,10 @@ class ManhwaOCRApp:
         answer=messagebox.askyesnocancel('บันทึกงาน','มีงานที่ยังไม่ได้บันทึก ต้องการบันทึกโปรเจกต์ก่อนหรือไม่?')
         return self.save_project() if answer is True else answer is False
 
-    def open_project(self):
+    def open_project(self,path=None):
         if not self.guard() or not self.may_discard():
             return
-        path=filedialog.askopenfilename(title='เปิดโปรเจกต์ (.json หรือ .mtp)',
+        path=path or filedialog.askopenfilename(title='เปิดโปรเจกต์ (.json หรือ .mtp)',
             filetypes=[('โปรเจกต์ทั้งหมด (*.json, *.mtp)','*.json *.mtp'),
                        ('Manhwa OCR Project','*.json'),
                        ('Manga Translation Project (.mtp)','*.mtp')])
@@ -4378,7 +4378,9 @@ class ManhwaOCRApp:
 
 def main():
     root=tk.Tk()
-    try:ManhwaOCRApp(root)
+    try:
+        app=ManhwaOCRApp(root)
+        if len(sys.argv)==3 and sys.argv[1]=="--project":app.open_project(sys.argv[2])
     except Exception as exc:
         root.withdraw();messagebox.showerror('เปิดโปรแกรมไม่ได้',str(exc));root.destroy();return
     root.mainloop()

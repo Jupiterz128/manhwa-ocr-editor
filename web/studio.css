@@ -200,3 +200,4 @@ dialog::backdrop{background:rgba(0,0,0,.65)}
 #notice:empty,[hidden],#left[hidden]{display:none}
 a{color:var(--indigo-soft)}
 @media(max-width:1360px){#projectName{display:none}header{gap:4px}}
+#brushCursor{position:fixed;pointer-events:none;z-index:15;border:1px solid white;box-shadow:0 0 0 1px #111;border-radius:50%;transform:translate(-50%,-50%)}#viewport.painting,#viewport.painting *{cursor:none}#viewport.hand,#viewport.hand *{cursor:grab}#viewport.hand:active,#viewport.hand:active *{cursor:grabbing}.working::before{content:"";display:inline-block;width:12px;height:12px;margin-right:7px;border:2px solid #7779;border-top-color:white;border-radius:50%;animation:spinExport .7s linear infinite}@keyframes spinExport{to{transform:rotate(360deg)}}#exportStatus{display:block;color:#c1c4d0}.export-ok#exportStatus{color:#70ce9a}

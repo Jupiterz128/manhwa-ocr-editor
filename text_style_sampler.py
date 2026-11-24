@@ -31,7 +31,7 @@ def effects(layer=None):
     return style
 
 
-def sample_style(orig, cleaned, bubble):
+def sample_style(orig, cleaned, bubble, *, include_color=False):
     style = effects()
     bounds = [l['box'] for l in getattr(bubble,'lines',[]) if l.get('box')]
     x,y,r,b = map(int,bubble.box)
@@ -43,10 +43,24 @@ def sample_style(orig, cleaned, bubble):
     lab = cv2.cvtColor(rgb.astype(np.float32)/255, cv2.COLOR_RGB2LAB)
     edge = np.concatenate((lab[0],lab[-1],lab[:,0],lab[:,-1]))
     background = np.median(edge,axis=0)
+    mask=None
     if cleaned is not None and cleaned is not orig:
         bg = cv2.cvtColor(np.asarray(cleaned.crop(box).convert('RGB'),np.float32)/255,cv2.COLOR_RGB2LAB)
         mask = np.linalg.norm(lab-bg,axis=2)>12
-    else:
+    if mask is None or (include_color and not mask.any()):
+        # A page can already contain patches for other bubbles. Sample the local
+        # OCR line perimeters when this particular word has no clean reference.
+        if include_color and bounds:
+            samples=[]
+            for lx,ly,rx,by in bounds:
+                x0=max(0,int(lx)-box[0]-2);y0=max(0,int(ly)-box[1]-2)
+                x1=min(lab.shape[1],int(rx)-box[0]+2);y1=min(lab.shape[0],int(by)-box[1]+2)
+                region=lab[y0:y1,x0:x1]
+                if region.size:samples.extend((region[0],region[-1],region[:,0],region[:,-1]))
+            if samples:
+                local=np.concatenate(samples)
+                median=np.median(local,axis=0)
+                if np.mean(np.linalg.norm(local-median,axis=1)<10)>=.90:edge,background=local,median
         if np.mean(np.linalg.norm(edge-background,axis=1)<10)<.90:
             return style
         bg = np.broadcast_to(background,lab.shape)
@@ -64,6 +78,7 @@ def sample_style(orig, cleaned, bubble):
         return style
     distance=cv2.distanceTransform(mask.astype(np.uint8),cv2.DIST_L2,5)
     core=distance>1.5
+    if not core.any():core=mask & (distance>=distance.max()*.8)
     best=0
     for size in range(1,9):
         inside=distance>size+.4
@@ -85,6 +100,8 @@ def sample_style(orig, cleaned, bubble):
             best=score
             core=inside
             style['stroke'].update(enabled=True,color=np.median(rgb[ring],axis=0).astype(int).tolist(),size=size)
+    if include_color and core.any():
+        style['color']=np.median(rgb[core],axis=0).round().astype(int).tolist()
     if core.sum()<24:return style
     ys,xs=np.nonzero(core)
     strongest=22

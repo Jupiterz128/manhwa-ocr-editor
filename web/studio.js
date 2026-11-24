@@ -159,11 +159,40 @@ function activeImageView(){
  if(maskEdit&&bubble())return (maskPreviewOn&&hasMaskPreview)?'mask_preview':'mask_draft';
  return view
 }
+let samplingPixel=false,maskSerial=0, spaceHeld=false, cursorPoint=null, strokeWrites=Promise.resolve();
+const cursor=el('div');cursor.id='brushCursor';document.body.append(cursor);
+function updateCursor(e){
+ if(e)cursorPoint=[e.clientX,e.clientY];
+ const vp=$('viewport'),pan=maskEdit&&spaceHeld;
+ vp.classList.toggle('hand',pan);vp.classList.toggle('painting',maskEdit&&!pan&&!maskPreviewOn);
+ cursor.hidden=!maskEdit||pan||maskPreviewOn||!cursorPoint;
+ if(cursor.hidden)return;
+ const size=2*Number($('radius').value)*zoom;
+ Object.assign(cursor.style,{left:cursorPoint[0]+'px',top:cursorPoint[1]+'px',width:size+'px',height:size+'px'})
+}
 function image(){
  if(!page())return;
- let v=activeImageView();
- let q='?view='+v+'&v='+revision+(maskEdit&&id?'&bid='+encodeURIComponent(id):'');
- $('art').src='/api/'+key+'/image/'+n+q
+ const v=activeImageView(),version=++maskSerial,c=$('paint'),draft=v==='mask_draft';
+ const url='/api/'+key+'/image/'+n+'?v='+revision+'&bid='+encodeURIComponent(id)+'&view=';
+ $('art').src=url+(draft?'mask_base':v);
+ c.style.opacity=draft?'.58':'1';
+ if(draft){
+  const bitmap=new Image();
+  bitmap.onload=()=>{
+   if(maskSerial!==version)return;
+   c.width=page().width;c.height=page().height;
+   c.getContext('2d').drawImage(bitmap,0,0);c.dataset.ready='yes'
+  };
+  c.dataset.ready='loading';bitmap.src=url+'mask_alpha'
+ }else{c.width=1;c.dataset.ready=''}
+ updateCursor()
+}
+function paintSegment(a,b,r,remove){
+ const ctx=$('paint').getContext('2d');ctx.save();
+ ctx.globalCompositeOperation=remove?'destination-out':'source-over';
+ ctx.fillStyle=ctx.strokeStyle='#8b5cf6';ctx.lineWidth=2*r;ctx.lineCap='round';
+ ctx.beginPath();ctx.moveTo(...a);ctx.lineTo(...b);ctx.stroke();
+ ctx.beginPath();ctx.arc(b[0],b[1],r,0,2*Math.PI);ctx.fill();ctx.restore()
 }
 function fit(){if(page()){let vp=$('viewport');zoom=Math.min(1,(vp.clientWidth-28)/page().width,(vp.clientHeight-88)/page().height);zoom=Math.max(.025,zoom)}}
 function scale(value){zoom=Math.max(.025,Math.min(5,value));draw()}
@@ -439,12 +468,13 @@ async function deleteBubbleById(targetId){
 async function startMaskEdit(){
  if(!bubble()){info('เลือกกรอบข้อความก่อนแก้ Mask');return}
  await withBusy(async()=>{
-  prevView=view;move=false;drawFrame=false;maskEdit=true;maskPreviewOn=false;hasMaskPreview=false;
+  samplingPixel=false;$('maskMethod').value='auto';prevView=view;move=false;drawFrame=false;maskEdit=true;maskPreviewOn=false;hasMaskPreview=false;
   const res=await api(key+'/page/'+n+'/mask_start',{id});
   revision++;refresh();info(res.note)
  },'กำลังเปิดโหมดแก้ Mask…')
 }
 async function cancelMaskEdit(silent=false){
+ await strokeWrites.catch(()=>{});strokeWrites=Promise.resolve();
  if(!maskEdit)return;
  const bid=id;
  maskEdit=false;maskPreviewOn=false;hasMaskPreview=false;view=prevView||view;
@@ -452,22 +482,25 @@ async function cancelMaskEdit(silent=false){
  revision++;refresh();if(!silent)info('ยกเลิกการแก้ Mask แล้ว')
 }
 async function applyMaskEdit(){
+ await strokeWrites;
  if(!maskEdit||!bubble())return;
  await withBusy(async()=>{
-  const res=await api(key+'/page/'+n+'/mask_apply',{id});
+  const res=await api(key+'/page/'+n+'/mask_apply',{id,method:$('maskMethod').value,color:$('maskMethod').value==='solid'?triplet($('solidColor').value):null});
   pages[n]=res.page;maskEdit=false;maskPreviewOn=false;hasMaskPreview=false;view='clean';
   revision++;refresh();info(res.note)
  },'กำลังบันทึกผล Clean…')
 }
 async function previewMaskEdit(){
+ await strokeWrites;
  if(!maskEdit||!bubble())return;
  await withBusy(async()=>{
-  const res=await api(key+'/page/'+n+'/mask_preview',{id});
+  const res=await api(key+'/page/'+n+'/mask_preview',{id,method:$('maskMethod').value,color:$('maskMethod').value==='solid'?triplet($('solidColor').value):null});
   hasMaskPreview=!!res.has_preview;maskPreviewOn=hasMaskPreview;
   revision++;bars();image();draw();info(res.note)
  },'กำลังประมวลผล Preview…')
 }
 async function undoMaskEdit(){
+ await strokeWrites.catch(()=>{});strokeWrites=Promise.resolve();
  if(!maskEdit||!bubble())return;
  await withBusy(async()=>{
   const res=await api(key+'/page/'+n+'/mask_undo',{id});
@@ -494,6 +527,15 @@ const point=e=>{let r=$('stage').getBoundingClientRect();return [(e.clientX-r.le
 $('viewport').onpointerdown=e=>{
  if(busy||!page())return;
  let target=e.target.closest('.bubble'),p=point(e);
+ if(maskEdit&&samplingPixel&&!spaceHeld){
+  samplingPixel=false;
+  run(async()=>{const result=await api(key+'/page/'+n+'/pick_color',{id,point:p});$('solidColor').value=rgb(result.color);$('maskMethod').value='solid';info('เลือกสีพื้น '+rgb(result.color))});return
+ }
+ if(maskEdit&&spaceHeld&&e.button===0){
+  updateCursor(e);
+  drag={kind:'pan',p:[e.clientX,e.clientY],sx:$('viewport').scrollLeft,sy:$('viewport').scrollTop};
+  $('viewport').setPointerCapture(e.pointerId);return
+ }
  if(drawFrame){
   drag={kind:'draw',start:p,end:p};
   let c=$('paint');c.width=page().width;c.height=page().height;
@@ -501,8 +543,8 @@ $('viewport').onpointerdown=e=>{
  }
  if(maskEdit&&bubble()){
   if(maskPreviewOn){maskPreviewOn=false;image();bars()}
-  drag={kind:'maskPaint',points:[p]};
-  let c=$('paint');c.width=page().width;c.height=page().height;
+  if($('paint').dataset.ready!=='yes')return;
+  drag={kind:'maskPaint',points:[p],radius:+$('radius').value,erase};paintSegment(p,p,drag.radius,drag.erase);
   $('viewport').setPointerCapture(e.pointerId);return
  }
  if(target){
@@ -524,7 +566,7 @@ $('viewport').onpointerdown=e=>{
  $('viewport').setPointerCapture(e.pointerId)
 };
 $('viewport').onpointermove=e=>{
- if(!drag)return;let p=point(e);
+ updateCursor(e);if(!drag)return;let p=point(e);
  if(drag.kind==='draw'){
   drag.end=p;let c=$('paint'),ctx=c.getContext('2d');
   ctx.clearRect(0,0,c.width,c.height);
@@ -534,9 +576,10 @@ $('viewport').onpointermove=e=>{
   return
  }
  if(drag.kind==='maskPaint'){
-  let prev=drag.points.at(-1);drag.points.push(p);let ctx=$('paint').getContext('2d');
-  ctx.strokeStyle=erase?'#17181c':'#8b5cf6';ctx.lineWidth=2*+$('radius').value;ctx.lineCap='round';
-  ctx.beginPath();ctx.moveTo(...prev);ctx.lineTo(...p);ctx.stroke();return
+  for(const ev of (e.getCoalescedEvents?.().length?e.getCoalescedEvents():[e])){
+   const next=point(ev);paintSegment(drag.points.at(-1),next,drag.radius,drag.erase);drag.points.push(next)
+  }
+  return
  }
  if(drag.kind==='pan'){let v=$('viewport');v.scrollLeft=drag.sx+drag.p[0]-e.clientX;v.scrollTop=drag.sy+drag.p[1]-e.clientY;return}
  if(drag.kind==='rotate'){
@@ -617,12 +660,10 @@ $('viewport').onpointerup=e=>{
   return
  }
  if(d.kind==='maskPaint'){
-  run(async()=>{
-   try{
-    const res=await withBusy(()=>api(key+'/page/'+n+'/mask_paint',{id,points:d.points,radius:+$('radius').value,erase}),'กำลังอัปเดต Mask…');
-    if(res){hasMaskPreview=false;maskPreviewOn=false;revision++;bars();image();draw();info(res.note)}
-   }finally{$('paint').width=1}
-  });
+  const path=key+'/page/'+n+'/mask_paint',payload={id,points:d.points,radius:d.radius,erase:d.erase};
+  hasMaskPreview=false;maskPreviewOn=false;bars();
+  strokeWrites=strokeWrites.catch(()=>{}).then(()=>api(path,payload)).catch(err=>{info(err.message);revision++;image();throw err});
+  strokeWrites.catch(()=>{});
   return
  }
  if(d.kind==='rotate'){
@@ -641,7 +682,7 @@ $('viewport').onpointerup=e=>{
  }
 };
 $('viewport').onpointercancel=()=>{drag=null;$('paint').width=1;run(async()=>{if(key){pages=(await api(key+'/state')).pages;refresh()}})};
-$('viewport').onwheel=e=>{if(e.ctrlKey){e.preventDefault();scale(zoom*(e.deltaY>0?.9:1.1))}};
+$('viewport').onwheel=e=>{if(e.ctrlKey){e.preventDefault();if(maskEdit){let r=$('radius');r.value=Math.min(+r.max,Math.max(+r.min,+r.value+(e.deltaY>0?-1:1)));r.oninput();updateCursor(e)}else scale(zoom*(e.deltaY>0?.9:1.1))}};
 function side(which){let node=$(which);node.hidden=!node.hidden;document.querySelector('main').style.setProperty('--'+which,node.hidden?'0px':which==='left'?'268px':'320px')}
 async function applyFontPreset(){
  if(!key||!pages.length){info('เปิดโปรเจกต์ก่อนจัดฟอนต์ตามโปรไฟล์');return}
@@ -695,6 +736,10 @@ async function openPresetEditor(isNew=false){
 }
 const commands={
  ocrOptions:['1 OCR ทุกหน้า (เลือกภาษาและโมเดล)',openOcrModal,'1'],
+ advanced:['เครื่องมือเดิม · Smart Guides, Lasso, OCR ทางเลือก',async()=>{await flush();const r=await api(key+'/legacy',{});info('เปิดเครื่องมือเดิมแล้ว บันทึก JSON แล้วเปิดกลับใน Studio · '+r.path,r.path)},''],
+ stitch:['SmartStitch · รวม/แบ่งหน้าเป็นโปรเจกต์ใหม่',()=>{const m=modal('SmartStitch');m.insertAdjacentHTML('beforeend','<label>ความสูงเป้าหมาย <input id="stitchH" type="number" value="15000"></label><label>ความกว้าง <input id="stitchW" type="number" value="720"></label>');m.append(btn('สร้างโปรเจกต์',async()=>{const height=+$('stitchH').value,width=+$('stitchW').value;$('dialog').close();await flush();const r=await withBusy(()=>api(key+'/stitch',{height,width}),'กำลังรวมและแบ่งหน้า…');if(r){await project(r.key,r.name);info(r.note)}}))},''],
+ rebuild:['สร้าง Mask ใหม่ตาม Margin/Grow',async()=>{if(!maskEdit)return;await strokeWrites;const r=await api(key+'/page/'+n+'/mask_rebuild',{id,margin:+$('maskMargin').value,grow:+$('maskGrow').value});hasMaskPreview=false;maskPreviewOn=false;revision++;image();bars();info(r.note)},''],
+ pipette:['ดูดสีพื้นจากภาพ',()=>{if(maskEdit){samplingPixel=true;info('คลิกบนภาพเพื่อเลือกสีพื้นต้นฉบับ')}} ,''],
  batchMask:['2 Mask ทุกหน้า',()=>batch('mask',{},'original'),'2'],
  batchClean:['3 Clean ทุกหน้า',()=>batch('clean',{},'clean'),'3'],
  move:['Move / Transform (ย้าย/ย่อขยาย 8 มุม)',async()=>{if(maskEdit)await cancelMaskEdit(true);drawFrame=false;move=!move;if(move&&bubble()?.translation?.trim()){view='thai';image()}bars();draw()},'V'],
@@ -862,27 +907,29 @@ async function exportModal(){
   +'<label>รูปแบบ<select id="format"><option value="psd">PSD</option><option value="mtp">MTP</option><option value="all">PSD + MTP</option></select></label>'
   +'<label><input type="checkbox" id="fxOn" checked> แนบ Live Layer Style</label>'
   +'<label><input type="checkbox" id="drive"> อัปโหลด Google Drive</label>'
-  +'<progress max="100" value="0"></progress><div id="exportResult"></div>'
+  +'<progress max="100" value="0"></progress><output id="exportStatus" aria-live="polite"></output><div id="exportResult"></div>'
  );
  $('exportDir').value=lastDir;
  $('pickExportDir').onclick=()=>run(async()=>{
+  submit.disabled=true;submit.classList.add('working');submit.textContent='กำลังเลือกโฟลเดอร์…';try{
   const res=await api('pick-folder',{title:'เลือกโฟลเดอร์ปลายทางสำหรับ Export PSD / MTP',initial_dir:$('exportDir').value});
-  if(res&&!res.cancelled&&res.path){$('exportDir').value=res.path;localStorage.setItem('studio-export-dir',res.path)}
+  if(res&&!res.cancelled&&res.path){$('exportDir').value=res.path;localStorage.setItem('studio-export-dir',res.path)}else{info('ยกเลิกการเลือกโฟลเดอร์')}
+  }finally{submit.disabled=false;submit.classList.remove('working');submit.textContent='ส่งออก'}
  });
  let bar=m.querySelector('progress'),outBox=$('exportResult');
  let submit=btn('ส่งออก',async()=>{
-  submit.disabled=true;outBox.replaceChildren();
+  submit.disabled=true;submit.classList.add('working');submit.textContent='กำลังส่งออก...';$('close').disabled=true;$('dialog').oncancel=e=>e.preventDefault();$('pickExportDir').disabled=true;outBox.replaceChildren();bar.value=0;const status=$('exportStatus');status.textContent='0% · กำลังเตรียมส่งออก';
   try{
    const dest=$('exportDir').value.trim();
    const j=await api(key+'/export',{backend:$('backend').value,format:$('format').value,fx:$('fxOn').checked,drive:$('drive').checked,destination:dest});
    while(true){
-    let r=await api('jobs/'+j+'/progress');bar.value=r.value;
+    let r=await api('jobs/'+j+'/progress');bar.value=r.value;status.textContent=r.value+'% · '+(r.status||'กำลังประมวลผล');
     if(r.done){
      for(let f of r.files){let a=el('a',f);a.href='/api/jobs/'+j+'/file/'+encodeURIComponent(f);a.download=f;outBox.append(el('br'),a)}
-     if(r.error){outBox.append(el('p',r.error))}
+     if(r.error){status.textContent='ส่งออกไม่สำเร็จ';outBox.append(el('p',r.error));info(r.error)}
      else{
       const target=(r.paths&&r.paths[0])||r.folder;
-      outBox.append(el('p',r.folder));
+      status.textContent='✓ 100% · ส่งออกสำเร็จ';status.className='export-ok';outBox.append(el('p',r.folder));
       let openBtn=btn('📂 เปิดโฟลเดอร์',()=>api('reveal',{path:target}));openBtn.className='btn-reveal';
       outBox.append(openBtn);
       info('ส่งออกสำเร็จ: '+r.folder,target)
@@ -891,7 +938,7 @@ async function exportModal(){
     }
     await new Promise(ok=>setTimeout(ok,500))
    }
-  }finally{submit.disabled=false}
+  }catch(e){status.textContent='ส่งออกไม่สำเร็จ · '+e.message;throw e}finally{$('close').disabled=false;$('dialog').oncancel=null;submit.disabled=false;submit.classList.remove('working');submit.textContent='ส่งออก';if($('pickExportDir'))$('pickExportDir').disabled=false}
  });
  submit.className='primary';
  m.append(submit)
@@ -904,7 +951,7 @@ document.onclick=e=>{
 $('percent').onclick=()=>scale(1);
 $('brush').onclick=()=>{erase=false;bars()};
 $('eraser').onclick=()=>{erase=true;bars()};
-$('radius').oninput=()=>{$('radiusValue').value=$('radius').value};
+$('radius').oninput=()=>{$('radiusValue').value=$('radius').value;updateCursor()};
 $('maskToggle').onclick=()=>{if(!hasMaskPreview)return;maskPreviewOn=!maskPreviewOn;image();bars()};
 document.onkeydown=e=>{
  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();palette();return}
@@ -942,3 +989,25 @@ document.onkeydown=e=>{
 };
 refresh();
 run(async()=>{await loadPresets();let last=localStorage.getItem('studio-project');if(last){let record=(await api('projects')).find(x=>x[0]===last);if(record)await project(...record)}});
+
+$('viewport').addEventListener('pointerleave',()=>{cursorPoint=null;updateCursor()});
+document.addEventListener('keydown',e=>{if(maskEdit&&e.code==='Space'&&!e.target.closest('textarea,input[type=text],select')){
+ e.preventDefault();
+ if(!spaceHeld&&drag?.kind==='maskPaint'&&cursorPoint){
+  $('viewport').onpointerup(e);
+  drag={kind:'pan',p:[...cursorPoint],sx:$('viewport').scrollLeft,sy:$('viewport').scrollTop}
+ }
+ spaceHeld=true;updateCursor()
+}},true);
+function releaseHand(resume){
+ spaceHeld=false;
+ if(drag?.kind==='pan'&&maskEdit){
+  drag=null;
+  if(resume&&cursorPoint&&$('paint').dataset.ready==='yes'){
+   let p=point({clientX:cursorPoint[0],clientY:cursorPoint[1]});
+   drag={kind:'maskPaint',points:[p],radius:+$('radius').value,erase}
+  }
+ }
+ updateCursor()
+}
+document.addEventListener('keyup',e=>{if(e.code==='Space')releaseHand(true)});window.addEventListener('blur',()=>releaseHand(false));
