@@ -7,7 +7,7 @@ import threading
 import time
 import uuid
 
-COMPONENT_VERSION='3.1'
+COMPONENT_VERSION='4.0'
 VOLUME=150  # MCI volume range: 0..1000. Set and verify before every play.
 SOUNDS={'ocr_all':'levelup.mp3','mask_all':'erro.mp3',
         'clean_all':'za-warudo-stop-time-sound.mp3','psd':'tuturu_1.mp3'}

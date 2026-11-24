@@ -1,4 +1,4 @@
-"""Manhwa OCR Editor 3.1 batch entry point for an interactive Windows login."""
+"""Manhwa OCR Editor 4.0 batch entry point for an interactive Windows login."""
 import argparse
 from dataclasses import asdict
 import json
@@ -40,6 +40,8 @@ def options():
     p.add_argument('--stitch-height', type=int, default=15000)
     p.add_argument('--stitch-width', type=int, default=720)
     p.add_argument('--skip-clean', type=boolean, default=False)
+    p.add_argument('--auto-stroke', action='store_true')
+    p.add_argument('--auto-gradient', action='store_true')
     p.add_argument('--export-format', choices=['psd','mtp','png','psd+mtp','all'], default='psd')
     p.add_argument('--psd-backend', choices=['photoshop','photopea'],
                    default=os.environ.get('MANHWA_PSD_BACKEND', DEFAULT_PSD_BACKEND))
@@ -250,7 +252,8 @@ def run(args):
                     b.custom_size=b.custom_width=0
                     b.custom_rotation=None
                     b.text_offset=[]
-                    b.text_layer=layout_text(work,b)
+                    b.text_layer=layout_text(work,b,original=raw,cleaned=work if page.clean_patches else None,
+                                             auto_stroke=args.auto_stroke,auto_gradient=args.auto_gradient)
             print(f'CLEAN / layout {100*i/len(pages):.0f}%',flush=True)
         checkpoint(output/'project.json',pages,drafts,args.preset)
         if drive_first and not stats['failures']:

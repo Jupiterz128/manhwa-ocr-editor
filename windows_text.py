@@ -4,7 +4,7 @@ from ctypes import wintypes as w
 import os
 from PIL import Image
 
-COMPONENT_VERSION='3.1'
+COMPONENT_VERSION='4.0'
 
 
 class SIZE(c.Structure):

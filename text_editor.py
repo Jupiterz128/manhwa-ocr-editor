@@ -5,7 +5,7 @@ from pathlib import Path
 from text_layout import translation_template,export_source_script,detect_and_parse_translations
 from app_ui import BG,FIELD,WHITE,SELECT,style_text_scrollbar
 
-COMPONENT_VERSION='3.1'
+COMPONENT_VERSION='4.0'
 
 
 class TextImportDialog:
@@ -81,7 +81,10 @@ class TextImportDialog:
             return value[:39]+'…' if len(value)>40 else value
         summary.extend(f'กรอบ #{i}: {short(src)} → {short(tr)}' for i,src,tr in report['samples'])
         if not changes:
-            messagebox.showinfo('ไม่มีคำแปลที่จับคู่ได้','\n'.join(summary),parent=self.win);return
+            line=next((i for i,v in enumerate(self.editor.get('1.0','end-1c').splitlines(),1) if v.strip()),1)
+            self.editor.tag_configure('import_error',background='#ffe0df',foreground='#8b0000')
+            self.editor.tag_add('import_error',f'{line}.0',f'{line}.end')
+            messagebox.showerror('ไม่มีคำแปลที่จับคู่ได้',f'บรรทัด {line} • '+ '\n'.join(summary),parent=self.win);return
         if not messagebox.askokcancel('ตรวจคำแปลก่อนจัด Text','\n'.join(summary),parent=self.win):return
         self.app.log(summary[1])
         for note in report['warnings']:self.app.log(note)

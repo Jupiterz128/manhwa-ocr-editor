@@ -49,7 +49,7 @@
             var item=layer.textItem;item.kind=TextType.POINTTEXT;
             item.contents=data.text.replace(/\n/g,'\r');item.font=job.font;
             var ink=new SolidColor();ink.rgb.red=data.color[0];ink.rgb.green=data.color[1];ink.rgb.blue=data.color[2];
-            item.color=ink;item.justification=Justification.CENTER;
+            item.color=ink;item.justification=data.alignment === 'left' ? Justification.LEFT : data.alignment === 'right' ? Justification.RIGHT : Justification.CENTER;
             item.fauxBold=false;item.fauxItalic=false;
             item.horizontalScale=100;item.verticalScale=100;item.tracking=0;item.baselineShift=0;
             item.autoKerning=AutoKernType.METRICS;item.language=Language.ENGLISHUK;
@@ -77,6 +77,7 @@
             if(item.tracking!==0 || item.autoKerning!==AutoKernType.METRICS || item.antiAliasMethod!==AntiAlias.SHARP ||
                 item.horizontalScale!==100 || item.verticalScale!==100 || item.baselineShift.as('pt')!==0 || item.language!==Language.ENGLISHUK)
                 throw new Error('Character settings were not preserved: '+data.name);
+            applyTextFX(document,layer,data);
             report.text_layers.push({id:data.id,name:layer.name,text:item.contents,font:item.font,
                 font_size:item.size.as('pt'),auto_leading:item.useAutoLeading,color:item.color.rgb.hexValue,bounds:b,box:rect,rotation:data.rotation || 0,
                 tracking:item.tracking,kerning:String(item.autoKerning),antialias:String(item.antiAliasMethod),

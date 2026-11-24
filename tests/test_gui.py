@@ -291,7 +291,7 @@ class GUITests(unittest.TestCase):
         dialog=TextImportDialog(self.app)
         dialog.editor.delete('1.0','end')
         dialog.editor.insert('1.0','รหัส: fixture\nคำต้นฉbับ: WRING\nคำแปลไทย: ผิดแล้ว')
-        with patch('text_editor.messagebox.showerror') as error,patch.object(self.app,'start_text_layout') as layout,patch.object(self.app,'log') as log:
+        with patch('text_editor.messagebox.showerror') as error,patch('text_editor.messagebox.askokcancel',return_value=True),patch.object(self.app,'start_text_layout') as layout,patch.object(self.app,'log') as log:
             dialog.apply_button.invoke();self.root.update()
             error.assert_not_called()
             layout.assert_called_once_with({'fixture':'ผิดแล้ว'})
@@ -607,7 +607,7 @@ class GUITests(unittest.TestCase):
         a=self.app;b=m.Bubble([80,70,640,350],lines=[{'box':[165,155,555,210]}])
         a.page().bubbles=[b];a.refresh_tree();self.select(b)
         editor=a.open_clean_editor()
-        with patch.object(a.cleaner,'clean',side_effect=RuntimeError('repair failed')):
+        with patch.object(a.cleaner,'clean',side_effect=RuntimeError('repair failed')),patch('clean_editor.messagebox.showerror'):
             editor.preview();self.pump(lambda:editor.busy)
         self.assertIsNone(editor.result);self.assertEqual(a.page().clean_patches,[])
         self.assertIn((a.page().id,b.id),a.clean_prepared)
@@ -639,7 +639,8 @@ class GUITests(unittest.TestCase):
         dialog=a.add_text();self.root.update()
         dialog.editor.delete('1.0','end')
         dialog.editor.insert('1.0',f'รหัส: {b.id}\nคำต้นฉบับ: Where are you going?\nคำแปลไทย: คุณกำลังจะไปไหน')
-        dialog.apply();self.pump(lambda:a.busy)
+        with patch('text_editor.messagebox.askokcancel',return_value=True):
+            dialog.apply();self.pump(lambda:a.busy)
         self.assertEqual(b.translation,'คุณกำลังจะไปไหน')
         self.assertEqual(b.text_layer['font'],'THSarabunNew-Bold');self.assertTrue(b.text_layer['auto_leading'])
         self.assertEqual(a.thai.get('1.0','end-1c'),b.translation)
@@ -667,7 +668,7 @@ class GUITests(unittest.TestCase):
         other=self.folder/'other.png';Image.new('RGB',(200,200),'white').save(other)
         a.add_paths([other]);self.root.update()
         report={'clean_layers':0,'text_layers':[],'warnings':[]}
-        with patch('photoshop_export.photoshop_progid',return_value='test'),patch('photoshop_export.export_psd',side_effect=[RuntimeError('first page failed'),report]) as export,patch.object(m.filedialog,'askdirectory',return_value=str(self.folder)):
+        with patch('photoshop_export.photoshop_progid',return_value='test'),patch('photoshop_export.export_psd',side_effect=[RuntimeError('first page failed'),report]) as export,patch.object(m.filedialog,'askdirectory',return_value=str(self.folder)),patch.object(m.messagebox,'showwarning'):
             a.export_psd_pages(True,False);self.pump(lambda:a.busy)
         self.assertEqual(export.call_count,2)
         self.assertIn('สำเร็จ 1',a.status.get());self.assertIn('ล้มเหลว 1',a.status.get())

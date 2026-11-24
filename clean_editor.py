@@ -9,7 +9,7 @@ import numpy as np
 from PIL import Image, ImageTk
 from bubble_cleaner import prepare_region, encode_patch
 
-COMPONENT_VERSION='3.1'
+COMPONENT_VERSION='4.0'
 
 
 class CleanEditor:

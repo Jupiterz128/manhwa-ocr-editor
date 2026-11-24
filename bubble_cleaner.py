@@ -10,7 +10,7 @@ import numpy as np
 from PIL import Image
 from frame_geometry import paint_shape, valid_quad, outline_read
 
-COMPONENT_VERSION='3.1'
+COMPONENT_VERSION='4.0'
 
 LAMA_URL='https://github.com/enesmsahin/simple-lama-inpainting/releases/download/v0.1.0/big-lama.pt'
 

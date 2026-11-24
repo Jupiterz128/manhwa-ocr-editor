@@ -2,7 +2,7 @@
 import cv2
 import numpy as np
 from PIL import Image
-COMPONENT_VERSION='3.1'
+COMPONENT_VERSION='4.0'
 
 
 def outline_read(record,box):

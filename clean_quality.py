@@ -5,7 +5,7 @@ import numpy as np
 from bubble_cleaner import smooth_background,background_samples,_rect
 from frame_geometry import paint_shape,valid_quad
 
-COMPONENT_VERSION='3.1'
+COMPONENT_VERSION='4.0'
 
 
 def _flat_surface(image,region,mask):

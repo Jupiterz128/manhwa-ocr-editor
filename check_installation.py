@@ -2,7 +2,7 @@
 import ast
 from pathlib import Path
 import sys
-EXPECTED='3.1'
+EXPECTED='4.0'
 
 def check(folder):
     failures=[]
@@ -19,6 +19,6 @@ def check(folder):
 if __name__=='__main__':
     folder=Path(__file__).resolve().parent;errors=check(folder)
     if errors:
-        print('UPDATE INCOMPLETE. Copy ALL files from the 3.1 ZIP into this folder:')
+        print('UPDATE INCOMPLETE. Copy ALL files from the 4.0 ZIP into this folder:')
         print(folder);print('\n'.join(errors));sys.exit(1)
-    print('All components are 3.1. Starting detailed cleaner...')
+    print('All components are 4.0. Starting detailed cleaner...')

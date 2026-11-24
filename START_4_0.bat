@@ -11,5 +11,6 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-.venv\Scripts\python.exe manhwa_ocr.py
+.venv\Scripts\python.exe web_api.py
 if errorlevel 1 pause
+

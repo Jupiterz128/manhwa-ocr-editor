@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manhwa OCR Editor 3.1 — local OCR, CLEAN, MTP exchange and lossless SmartStitch.
+"""Manhwa OCR Editor 4.0 — local OCR, CLEAN, MTP exchange and lossless SmartStitch.
 Run: python manhwa_ocr.py. See README_TH.md for installation and model sources.
 OCR packages load lazily; opening/editing a project never needs a cloud key.
 """
@@ -33,7 +33,7 @@ from bubble_cleaner import (Cleaner, CleanRegion, prepare_region, encode_patch, 
                             compose_page, export_cleaned, encode_region, decode_region, lama_model_path)
 from frame_geometry import box_quad, frame_quad, valid_quad, quad_bounds, move_line, translation, ocr_crop, psd_stem, outline_read, auto_tilt, quad_angle
 
-APP_VERSION = '3.1'
+APP_VERSION = '4.0'
 REVIEW_THRESHOLD = 0.90
 DEFAULT_FONT_CHOICE = 'TH Sarabun New Bold'
 DATA_DIR = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'ManhwaOCREditor'
@@ -75,7 +75,7 @@ def verify_clean_components():
         module=importlib.import_module(name)
         actual=getattr(module,'COMPONENT_VERSION','เก่า/ไม่ระบุ')
         if actual!=APP_VERSION:problems.append(name+'.py: '+str(actual))
-    if problems:raise RuntimeError('ไฟล์โปรแกรมคนละรุ่น ต้องวางไฟล์ทั้งหมดจาก ZIP 3.1 แล้วเปิด START_3_1.bat\n'+'\n'.join(problems))
+    if problems:raise RuntimeError('ไฟล์โปรแกรมคนละรุ่น ต้องวางไฟล์ทั้งหมดจาก ZIP 4.0 แล้วเปิด START_3_1.bat\n'+'\n'.join(problems))
 
 
 def uid():
@@ -704,8 +704,8 @@ class EasyEngine:
 
     def _read(self, image, fast):
         result = self.reader.readtext(np.asarray(image), detail=1, paragraph=False,
-                    decoder='greedy', beamWidth=5,
-                    rotation_info=None, workers=0,
+                    decoder='greedy' if fast else 'beamsearch', beamWidth=5,
+                    rotation_info=None if fast else [90,180,270], workers=0,
                     text_threshold=.55, low_text=.3, link_threshold=.35,
                     contrast_ths=.1 if fast else .2, adjust_contrast=.7,
                     canvas_size=2560 if fast else 1600, mag_ratio=1.0 if fast else 1.2)
@@ -1427,6 +1427,8 @@ def read_mtp(mtp_file, cancel, emit, extract_dir=None):
 
         page_bubbles=[]
         layer_hints={}
+        layer_styles={}
+        editor_layers={}
         mtp_id_to_bid={}
         for t_it in text_entries:
             raw_b=t_it.get('box')
@@ -1468,7 +1470,9 @@ def read_mtp(mtp_file, cancel, emit, extract_dir=None):
                 pref_xy=(float(tl['x']),float(tl['y'])) if ('x' in tl and 'y' in tl) else None
                 raw_rot=float(tl.get('rot') or 0.0)
                 pref_rot=raw_rot if abs(raw_rot)>=0.2 else None
+                if isinstance(tl.get('studioTextLayer'),dict):editor_layers[b_obj.id]=tl['studioTextLayer']
                 layer_hints[b_obj.id]=(pref_sz,pref_xy,pref_rot)
+                layer_styles[b_obj.id]={k:tl[k] for k in ('stroke','gradient','manual_effects') if tl and k in tl}
             page_bubbles.append(b_obj)
             if t_it.get('id') is not None:
                 mtp_id_to_bid[str(t_it.get('id'))]=b_obj.id
@@ -1500,6 +1504,7 @@ def read_mtp(mtp_file, cancel, emit, extract_dir=None):
             raw_rot=float(tl.get('rot') or 0.0)
             pref_rot=raw_rot if abs(raw_rot)>=0.2 else None
             layer_hints[b_obj.id]=(pref_sz,(cx,cy),pref_rot)
+            layer_styles[b_obj.id]={k:tl[k] for k in ('stroke','gradient','manual_effects') if tl and k in tl}
             page_bubbles.append(b_obj)
 
         page_bubbles.sort(key=lambda b:(b.box[1],b.box[0]))
@@ -1543,6 +1548,16 @@ def read_mtp(mtp_file, cancel, emit, extract_dir=None):
                         font_choice=b_obj.font_choice,
                         preferred_size=pref_sz,center_xy=pref_xy,preferred_rot=pref_rot,
                     )
+                    saved=editor_layers.get(b_obj.id)
+                    if saved:
+                        from text_layout import validate_layer
+                        validate_layer(saved)
+                        b_obj.text_layer=dict(saved,bubble_box=list(b_obj.box),bubble_quad=b_obj.quad)
+                        b_obj.custom_size=int(saved.get('custom_size',0))
+                        b_obj.custom_rotation=saved.get('custom_rotation')
+                        b_obj.custom_width=int(saved.get('custom_width',0))
+                        b_obj.text_offset=saved.get('text_offset',[])
+                    b_obj.text_layer.update(layer_styles.get(b_obj.id,{}))
                     if b_obj.text_layer.get('font_choice'):
                         b_obj.font_choice=b_obj.text_layer['font_choice']
                     total_laid+=1
@@ -1610,6 +1625,8 @@ def write_mtp(path, tasks, preset_map, cancel, emit):
                 fsz=int(round(b.text_layer.get('font_size',24))) if b.text_layer else 24
                 col='#FFFFFF' if (b.text_layer and b.text_layer.get('color')==[255,255,255]) else '#000000'
                 tl_list.append({
+                    **({'studioTextLayer':b.text_layer} if b.text_layer and 'editor_box' in b.text_layer else {}),
+                    **{k:b.text_layer[k] for k in ('stroke','gradient','manual_effects') if b.text_layer and k in b.text_layer},
                     'id':layer_id,'type':'text','number':b_i,
                     'text':(b.text_layer.get('text') if b.text_layer else None) or b.translation,
                     'x':int(round((tb[0]+tb[2])/2.0)),'y':int(round((tb[1]+tb[3])/2.0)),
@@ -1619,7 +1636,7 @@ def write_mtp(path, tasks, preset_map, cancel, emit):
                     'fontFamily':getattr(b,'font_choice',DEFAULT_FONT_CHOICE),
                     'weight':'bold','style':'normal','color':col,
                     'rot':float(b.text_layer.get('rotation',0) if b.text_layer else 0),
-                    'align':'center','textAlign':'center','lineHeight':1.2,
+                    'align':(b.text_layer or {}).get('alignment','center'),'textAlign':(b.text_layer or {}).get('alignment','center'),'lineHeight':1.2,
                     'letterSpacing':0,'opacity':1,'visible':True,'selected':False,
                 })
         for u_i,pt in enumerate(p.clean_patches,1):
@@ -1937,7 +1954,7 @@ class ManhwaOCRApp:
     def __init__(self, root):
         self.root = root
         verify_clean_components()
-        root.title('Manhwa OCR Editor 3.1 — OCR / CLEAN / MTP / SmartStitch')
+        root.title('Manhwa OCR Editor 4.0 — OCR / CLEAN / MTP / SmartStitch')
         width=min(1880,root.winfo_screenwidth()-40)
         height=min(990,root.winfo_screenheight()-90)
         root.geometry(f'{width}x{height}+20+20')
@@ -2857,6 +2874,15 @@ class ManhwaOCRApp:
         self.refresh_clean_view()
         self.status.set(f'ลบกรอบ {len(removed_bs)} ช่อง และคืนภาพต้นฉบับ {restored_n} จุดเรียบร้อย (Ctrl+Z ย้อนกลับได้)')
 
+    def _current_effect_options(self):
+        stroke,gradient=self.auto_stroke.get(),self.auto_gradient.get()
+        if not (stroke or gradient):
+            return {}
+        cleaned=self.cleaned_preview
+        if cleaned is None and self.page().clean_patches:
+            cleaned=compose_page(self.image,self.page().clean_patches)
+        return dict(original=self.image,cleaned=cleaned,auto_stroke=stroke,auto_gradient=gradient)
+
     def _relayout_changed_bubbles(self,changed_pairs,status_note):
         from text_layout import layout_text
         to_layout=[]
@@ -2877,10 +2903,11 @@ class ManhwaOCRApp:
         cur_p=self.page()
         if len(to_layout)<=10 and cur_p and all(p_obj.id==cur_p.id for p_obj,_ in to_layout) and self.image is not None:
             work_im=self.cleaned_preview if self.cleaned_preview is not None else self.image
+            effect_options=self._current_effect_options()
             for _,b_obj in to_layout:
                 chosen=getattr(b_obj,'font_choice',None) or DEFAULT_FONT_CHOICE
                 try:
-                    b_obj.text_layer=layout_text(work_im,b_obj,b_obj.translation,font_choice=chosen,
+                    b_obj.text_layer=layout_text(work_im,b_obj,b_obj.translation,font_choice=chosen,**effect_options,
                                                  custom_size=getattr(b_obj,'custom_size',0),
                                                  custom_width=getattr(b_obj,'custom_width',0),
                                                  custom_rotation=getattr(b_obj,'custom_rotation',None))
@@ -3678,6 +3705,9 @@ class ManhwaOCRApp:
                     record['path']=p.path
                 data['pages'].append(record)
             atomic_json(path,data)
+            for p in self.pages:
+                self.cache.put('text-effects:v1:'+p.id,{b.id:{k:b.text_layer[k] for k in
+                    ('stroke','gradient','manual_effects') if k in b.text_layer} for b in p.bubbles if b.text_layer})
             self.project_path=path
             self.dirty=False
             self.status.set('บันทึกโปรเจกต์แล้ว: '+str(path))
@@ -3715,6 +3745,12 @@ class ManhwaOCRApp:
             if data.get('font_preset') in self.font_presets_map:
                 self.font_preset.set(data['font_preset'])
             pages,drafts,missing=read_project_pages(data,path)
+            for p in pages:
+                saved=self.cache.get('text-effects:v1:'+p.id) or {}
+                for b in p.bubbles:
+                    if b.text_layer:
+                        for key,value in saved.get(b.id,{}).items():
+                            b.text_layer.setdefault(key,value)
             if missing:
                 folder=filedialog.askdirectory(title='ไม่พบภาพต้นฉบับ เลือกโฟลเดอร์ภาพเพื่อเชื่อมใหม่ (ยกเลิกเพื่อเปิดเฉพาะข้อความ)')
                 for p in missing:
@@ -4004,6 +4040,7 @@ class ManhwaOCRApp:
             messagebox.showinfo('ยังไม่มีกรอบ','ยังไม่มีกรอบข้อความในหน้าที่เลือก');return
 
         self.snapshot()
+        auto_stroke,auto_gradient=self.auto_stroke.get(),self.auto_gradient.get()
         task_pages=[(p.id,p.path,[copy.deepcopy(b) for b in bs],copy.deepcopy(p.clean_patches)) for p,bs in page_targets]
 
         def work():
@@ -4025,6 +4062,7 @@ class ManhwaOCRApp:
                         self.events.put(('log',f'[{preset_name}] {Path(path).name} กรอบ {b_idx+1}: [{FRAME_TYPE_LABELS.get(ftype,ftype)}] → จัดกึ่งกลางใหม่ด้วย {chosen_font}'))
                         try:
                             layer=layout_text(raw_im if b.engine=="MTP" else work_im,b,b.translation,font_choice=chosen_font,
+                                              original=raw_im,cleaned=work_im if patches else None,auto_stroke=auto_stroke,auto_gradient=auto_gradient,
                                               custom_size=0,custom_width=0,text_offset=[],custom_rotation=None)
                             laid_out+=1
                         except Exception as exc:
@@ -4080,10 +4118,11 @@ class ManhwaOCRApp:
         if self.image is not None and len(translated)<=4:
             errors=[]
             work_im=self.cleaned_preview if self.cleaned_preview is not None else self.image
+            effect_options=self._current_effect_options()
             for b in translated:
                 chosen=getattr(b,'font_choice',None) or DEFAULT_FONT_CHOICE
                 try:
-                    b.text_layer=layout_text(work_im,b,b.translation,font_choice=chosen,
+                    b.text_layer=layout_text(work_im,b,b.translation,font_choice=chosen,**effect_options,
                                              custom_size=b.custom_size,custom_width=b.custom_width,
                                              text_offset=getattr(b,'text_offset',[]),
                                              custom_rotation=getattr(b,'custom_rotation',None))
@@ -4143,6 +4182,7 @@ class ManhwaOCRApp:
         from text_layout import layout_text
         errors=[]
         work_im=self.cleaned_preview if self.cleaned_preview is not None else self.image
+        effect_options=self._current_effect_options()
         for b in targets:
             if not b.translation.strip():continue
             cur_sz=int(round(b.text_layer.get('font_size',24))) if b.text_layer else int(getattr(b,'custom_size',0) or 24)
@@ -4151,7 +4191,7 @@ class ManhwaOCRApp:
             b.custom_width=int(np.clip(round(max(28,cur_w)*float(factor)),28,self.image.width-8))
             chosen=getattr(b,'font_choice',None) or DEFAULT_FONT_CHOICE
             try:
-                b.text_layer=layout_text(work_im,b,b.translation,font_choice=chosen,
+                b.text_layer=layout_text(work_im,b,b.translation,font_choice=chosen,**effect_options,
                                          custom_size=b.custom_size,custom_width=b.custom_width,
                                          text_offset=getattr(b,'text_offset',[]),
                                          custom_rotation=getattr(b,'custom_rotation',None))
@@ -4194,6 +4234,7 @@ class ManhwaOCRApp:
         self._run_text_layout_tasks(tasks,summary_prefix='จัด Text',frame_tags=frame_tags)
 
     def _run_text_layout_tasks(self,tasks,summary_prefix='จัด Text',frame_tags=None):
+        auto_stroke,auto_gradient=self.auto_stroke.get(),self.auto_gradient.get()
         patches_by_pid={p.id:copy.deepcopy(p.clean_patches) for p in self.pages if p.clean_patches}
         def work():
             from text_layout import layout_text
@@ -4208,7 +4249,8 @@ class ManhwaOCRApp:
                             pts=patches_by_pid.get(pid)
                             image=compose_page(raw_im,pts) if pts else raw_im
                             last_key=(pid,path)
-                        layer=layout_text(image,b,translation,font_choice=font_choice,
+                        layer=layout_text(image,b,translation,font_choice=font_choice,original=raw_im,cleaned=image if pts else None,
+                                          auto_stroke=auto_stroke,auto_gradient=auto_gradient,
                                           custom_size=getattr(b,'custom_size',0),
                                           custom_width=getattr(b,'custom_width',0),
                                           text_offset=getattr(b,'text_offset',[]),
@@ -4247,6 +4289,7 @@ class ManhwaOCRApp:
         except Exception as exc:messagebox.showerror('ส่งออก PSD',str(exc));return
         parent=filedialog.askdirectory(title='เลือกโฟลเดอร์ส่งออก PSD (แยกหนึ่งไฟล์ต่อหน้า)')
         if not parent:return
+        auto_stroke,auto_gradient=self.auto_stroke.get(),self.auto_gradient.get()
         tasks=copy.deepcopy(targets);folder=Path(parent)/'psd_pages'
         page_numbers={p.id:i+1 for i,p in enumerate(self.pages)}
         def work():
@@ -4264,7 +4307,9 @@ class ManhwaOCRApp:
                         for b in p.bubbles:
                             if b.translation.strip() and not is_current(b):
                                 chosen=getattr(b,'font_choice',None) or DEFAULT_FONT_CHOICE
-                                b.text_layer=layout_text(work_im,b,b.translation,font_choice=chosen,
+                                b.text_layer=layout_text(work_im,b,b.translation,font_choice=chosen,original=image,
+                                                         cleaned=work_im if p.clean_patches else None,
+                                                         auto_stroke=auto_stroke,auto_gradient=auto_gradient,
                                                          custom_size=getattr(b,'custom_size',0),
                                                          custom_width=getattr(b,'custom_width',0),
                                                          text_offset=getattr(b,'text_offset',[]),

@@ -7,7 +7,7 @@ import time
 
 from text_layout import FRAME_TYPE_LABELS, extract_frame_tag, normalize
 
-COMPONENT_VERSION = '3.1'
+COMPONENT_VERSION = '4.0'
 DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash'
 
 _SYSTEM_PROMPT = """แปลการ์ตูนและเว็บตูนเป็นภาษาไทยสำหรับอ่านในบอลลูน อ่านบทตามลำดับทั้งตอนก่อนเลือกสำนวน

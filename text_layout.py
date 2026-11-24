@@ -14,7 +14,7 @@ from PIL import Image
 from bubble_cleaner import prepare_region, bounded_box
 from frame_geometry import valid_quad, quad_angle, quad_bounds, box_quad, map_points
 
-COMPONENT_VERSION='3.1'
+COMPONENT_VERSION='4.0'
 FONT_NAME='TH Sarabun New Bold'
 FONT_POSTSCRIPT='THSarabunNew-Bold'
 FONT_CHOICES=[
@@ -1051,6 +1051,7 @@ def scale_text_layer(image,bubble,old_layer,sx,sy,shift_y):
     if c_size>0:out['custom_size']=c_size
     if c_width>0:out['custom_width']=c_width
     if c_off:out['text_offset']=c_off
+    out.update({k:old_layer[k] for k in ('stroke','gradient','manual_effects') if k in old_layer})
     return out
 
 
@@ -1659,7 +1660,25 @@ def _thai_optical_dy(text,font_size,safe_mask,cx,cy,tile_w,tile_h):
     return 0
 
 
-def layout_text(image,bubble,translation=None,font_choice=None,custom_size=None,custom_width=None,text_offset=None,custom_rotation=None):
+def layout_text(image,bubble,translation=None,font_choice=None,custom_size=None,custom_width=None,text_offset=None,custom_rotation=None,
+                *, original=None, cleaned=None, auto_stroke=False, auto_gradient=False):
+    from text_style_sampler import effects, sample_style
+    previous = getattr(bubble, 'text_layer', None) or {}
+    layer = _position_text(image,bubble,translation,font_choice,custom_size,custom_width,text_offset,custom_rotation)
+    style = effects(previous)
+    manual = previous.get('manual_effects', False)
+    if (auto_stroke or auto_gradient) and not manual:
+        sampled = sample_style(original if original is not None else image, cleaned, bubble)
+        if auto_stroke:
+            style['stroke'] = sampled['stroke']
+        if auto_gradient:
+            style['gradient'] = sampled['gradient']
+    layer.update(style)
+    layer['manual_effects'] = manual
+    return layer
+
+
+def _position_text(image,bubble,translation=None,font_choice=None,custom_size=None,custom_width=None,text_offset=None,custom_rotation=None):
     """Fit in the frame's own axes, then carry its rotation and user offset to preview and PSD."""
     chosen=normalize_font_choice(font_choice or getattr(bubble,'font_choice',None) or FONT_NAME)
     c_size=int(getattr(bubble,'custom_size',0) if custom_size is None else custom_size)
@@ -1871,10 +1890,8 @@ def _layout_text(image,bubble,translation=None,box_options=None,font_choice=None
             max_block_h=int(round(min(bh_full*0.70,max(guide['orig_h']*1.22,bh_full*0.52))))
             max_block_w=int(round(min(bw_full*0.85,max(guide['orig_w']*1.25,bw_full*0.72))))
         else:
-            target_body=max(9.0,min(22.0 if short else 24.0,extent*(0.082 if short else 0.092)))
-            visual_cap=int(round(target_body/body_ratio))
-            geom_cap=int(extent*(.90 if narration else (.38 if short else .68)))
-            cap=min(110,max(12,min(visual_cap,geom_cap)))
+            # Without measured source glyphs, let the contour fit determine the size.
+            cap=min(110,max(12,round(extent*(.32 if short else .64))))
 
         if found and safe_mask is not None:
             # Thai tone marks share a glyph cell with their base consonant.
@@ -1942,11 +1959,13 @@ def _layout_text(image,bubble,translation=None,box_options=None,font_choice=None
                 largest=size;count=len(lines);choice=None
                 for candidate_size in range(largest,max(8,int(np.ceil(largest*.85)))-1,-1):
                     with TextRenderer(candidate_size,info.path,info.family,info.weight,info.italic) as renderer:
-                        for candidate_box in boxes:
+                        for k,candidate_box in enumerate([box]+boxes):
                             width=candidate_box[2]-candidate_box[0];height=candidate_box[3]-candidate_box[1]
                             aspect=height/max(1,width)
                             cw=int(width*(used_w_scale if aspect>1.35 else min(0.90,used_w_scale+0.03)))
                             ch=int(height*(used_h_scale if aspect>1.35 else min(0.84,used_h_scale+0.08)))
+                            if k==0:
+                                cw,ch=fit_max_w,fit_max_h
                             if max_block_w>0:cw=min(cw,int(max_block_w))
                             if max_block_h>0:ch=min(ch,int(max_block_h))
                             if cw<18 or ch<14 or (count-1)*candidate_size*1.2>ch:continue
@@ -1957,7 +1976,7 @@ def _layout_text(image,bubble,translation=None,box_options=None,font_choice=None
                             score=manga_line_score([renderer.measure(line)[0] for line in candidate])+.25*(largest-candidate_size)/largest
                             if choice is None or score<choice[0]:choice=(score,candidate_size,candidate,candidate_tile,candidate_box)
                     if choice is not None and .25*(largest-candidate_size+1)/largest>choice[0]:break
-                if choice is not None and choice[1]>=size-2:
+                if choice is not None:
                     _,size,lines,tile,box=choice
             bx_c=(box[0]+box[2])/2.0;by_c=(box[1]+box[3])/2.0
             pad_w=max(12,tile.width+6);pad_h=max(12,tile.height+6)
@@ -2008,7 +2027,7 @@ def validate_layer(layer):
         raise ValueError('รูปแบบฟอนต์ Text ไม่ตรงกับค่าที่รองรับ')
     if choice==FONT_NAME and ps_font!=FONT_POSTSCRIPT:
         raise ValueError('รูปแบบ Text ไม่ตรงกับค่าที่รองรับ')
-    if layer.get('color') not in ([0,0,0],[255,255,255]) or layer.get('auto_leading') is not True:
+    if not (isinstance(layer.get('color'),list) and len(layer['color'])==3 and all(type(c) is int and 0<=c<=255 for c in layer['color'])) or layer.get('auto_leading') is not True:
         raise ValueError('รูปแบบ Text ไม่ตรงกับค่าที่รองรับ')
     if any(layer.get(key,value)!=value for key,value in CHARACTER_STYLE.items()):raise ValueError('ค่า Character ต้องเป็น Tracking 0 / Metrics / Sharp / Scale 100% / Baseline 0 / English: UK')
     angle=layer.get('rotation',0)
@@ -2059,7 +2078,8 @@ def composite_text_crop(crop,bubbles,origin):
     for bubble in bubbles:
         if not is_current(bubble):continue
         layer=bubble.text_layer;b=layer['box']
-        if b[2]<=x or b[0]>=x+crop.width or b[3]<=y or b[1]>=y+crop.height:continue
+        pad=8 if (layer.get('stroke') or {}).get('enabled') else 0
+        if b[2]+pad<=x or b[0]-pad>=x+crop.width or b[3]+pad<=y or b[1]-pad>=y+crop.height:continue
         tile=rendered_tile(layer['text'],layer['font_size'],layer.get('font_choice',FONT_NAME))
         if layer.get('color')==[255,255,255]:
             white=Image.new('RGBA',tile.size,(255,255,255,0))
@@ -2068,6 +2088,9 @@ def composite_text_crop(crop,bubbles,origin):
             tile=tile.rotate(-layer['rotation'],resample=Image.Resampling.BICUBIC,expand=True)
             bounds=tile.getchannel('A').getbbox()
             if bounds:tile=tile.crop(bounds)
+        if any((layer.get(k) or {}).get('enabled') for k in ('stroke','gradient')):
+            from text_style_sampler import styled_tile
+            tile=styled_tile(tile,layer)
         left=round((b[0]+b[2]-tile.width)/2)-x;top=round((b[1]+b[3]-tile.height)/2)-y
         out.alpha_composite(tile,(left,top))
     return out.convert('RGB')

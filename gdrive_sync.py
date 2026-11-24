@@ -13,7 +13,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
-COMPONENT_VERSION='3.1'
+COMPONENT_VERSION='4.0'
 PSD_OUTPUT_FOLDER_ID='1I7v6bIhIedfuKyonuyD2ddnDNxEwYY4w'
 TEXT_EXPORT_FOLDER_ID='1X0jjn7vyQpRauLi7Y6z63nXCnEI07BH4'
 ROOT=Path(os.environ['LOCALAPPDATA'])/'ManhwaOCREditor'

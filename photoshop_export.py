@@ -14,7 +14,7 @@ import time
 from bubble_cleaner import compose_page
 from text_layout import FONT_NAME, FONT_POSTSCRIPT, is_current, resolve_font, validate_layer
 
-COMPONENT_VERSION='3.1'
+COMPONENT_VERSION='4.0'
 DEFAULT_PSD_BACKEND='photoshop'
 PHOTOPEA_URL='https://www.photopea.com'
 _PHOTOPEA_HOST='https://photopea-host.local'
@@ -351,7 +351,8 @@ def _photopea_build_pass1_script(payload):
                 ink.rgb.green = data.color[1];
                 ink.rgb.blue = data.color[2];
                 item.color = ink;
-                item.justification = Justification.CENTER;
+                item.useAutoLeading = true; item.autoLeadingAmount = 120;
+                item.justification = data.alignment === 'left' ? Justification.LEFT : data.alignment === 'right' ? Justification.RIGHT : Justification.CENTER;
                 item.position = [(rect[0] + rect[2]) / 2, rect[1] + data.font_size];
                 out.text_count++;
             }
@@ -366,7 +367,7 @@ def _photopea_build_pass1_script(payload):
 
 
 def _photopea_build_pass2_script(payload):
-    return 'var job = ' + json.dumps(payload, ensure_ascii=True) + ';\n' + r'''
+    return Path(__file__).with_name('text_layer_fx.jsx').read_text('utf-8')+'\nvar job = ' + json.dumps(payload, ensure_ascii=True) + ';\n' + r'''
 (function () {
     function bpx(layer) {
         var b = layer.bounds;
@@ -417,6 +418,7 @@ def _photopea_build_pass2_script(payload):
                 }
                 b = bpx(lyr);
                 var colHex = hex2(data.color[0]) + hex2(data.color[1]) + hex2(data.color[2]);
+                applyTextFX(doc,lyr,data,true);
                 report.text_layers.push({
                     id: data.id,
                     name: lyr.name,
@@ -741,7 +743,7 @@ def _export_psd_photoshop(image,page,destination,include_text=True,cancel=None):
                 b_ref=item['bubble_box']
                 item['bubble_quad']=[[b_ref[0],b_ref[1]],[b_ref[2],b_ref[1]],[b_ref[2],b_ref[3]],[b_ref[0],b_ref[3]]]
         script=folder/'export.jsx'
-        code=Path(__file__).with_suffix('.jsx').read_text(encoding='utf-8')
+        code=Path(__file__).with_name('text_layer_fx.jsx').read_text('utf-8')+'\n'+Path(__file__).with_suffix('.jsx').read_text(encoding='utf-8')
         script.write_text('\ufeffvar job = '+json.dumps(base_job,ensure_ascii=True)+';\n'+code,encoding='utf-8')
         run_script(script,cancel)
         if not Path(job['report']).is_file():raise RuntimeError('Photoshop ไม่ส่งรายงานผลกลับมา')

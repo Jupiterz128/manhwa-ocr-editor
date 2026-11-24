@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-COMPONENT_VERSION='3.1'
+COMPONENT_VERSION='4.0'
 
 
 def counts(records,total):
