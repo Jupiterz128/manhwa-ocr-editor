@@ -322,6 +322,41 @@ class StudioPersistenceTests(unittest.TestCase):
             if os.name == 'nt':
                 popen.assert_called_once_with(['explorer', f'/select,{str(txt_out.resolve())}'])
 
+    def test_font_presets_crud_apply_and_open_txt(self):
+        import text_layout as tl
+
+        im, b = fixtures.styled_fixture()
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(studio, 'ROOT', Path(tmp) / 'store'), \
+             patch.object(tl, 'presets_config_path', return_value=Path(tmp) / 'presets.json'):
+            root = Path(tmp)
+            source = root / '01.png'
+            im.save(source)
+            studio.save('pjob', '01.png', [Page(str(source), [b])], {})
+
+            # Open TXT via native path helper
+            txt_file = root / 'in.txt'
+            txt_file.write_text('1. สวัสดีจากไฟล์', encoding='utf-8')
+            opened = studio.open_txt_file({'path': str(txt_file)})
+            self.assertFalse(opened['cancelled'])
+            self.assertIn('สวัสดีจากไฟล์', opened['text'])
+
+            # Font presets list, create new profile, apply profile
+            listed = studio.get_font_presets()
+            self.assertIn('1. มังฮวาเกาหลี', listed['presets'])
+            self.assertEqual(len(listed['frame_types']), 9)
+            created = studio.update_font_presets({
+                'name': '3. ทดสอบโปรไฟล์',
+                'mapping': {ft['key']: 'TH Sarabun New Bold' for ft in listed['frame_types']},
+            })
+            self.assertIn('3. ทดสอบโปรไฟล์', created['presets'])
+            applied = studio.apply_font_preset('pjob', {'preset': '3. ทดสอบโปรไฟล์', 'all_pages': True})
+            self.assertEqual(applied['laid_out'], 1)
+            self.assertIn('3. ทดสอบโปรไฟล์', applied['note'])
+            pages, _ = studio.load('pjob')
+            self.assertEqual(pages[0].bubbles[0].font_choice, 'TH Sarabun New Bold')
+            self.assertTrue(pages[0].bubbles[0].text_layer['auto_leading'])
+
     @unittest.skipUnless(os.environ.get('TEST_STUDIO_BROWSER') == '1', 'opt-in browser and Photopea integration')
     def test_browser_transform_and_export_at_desktop_scaling(self):
         import uvicorn
@@ -389,6 +424,36 @@ class StudioPersistenceTests(unittest.TestCase):
                                 self.assertEqual(tab.locator('#bid').text_content(), 'B01')
                                 self.assertTrue(tab.locator('#frameBadge').is_visible())
 
+                                # Verify Bubbles/Layers shows B01 + text + status pill cleanly (not crushed to 0 width)
+                                layer_metrics = tab.evaluate(
+                                    """() => {
+                                      const row = document.querySelector('#layers .layer');
+                                      return {
+                                        bid: row.querySelector('.bid-tag')?.getBoundingClientRect().width || 0,
+                                        txt: row.querySelector('.layer-txt')?.getBoundingClientRect().width || 0,
+                                        pill: row.querySelector('.st-pill')?.getBoundingClientRect().width || 0,
+                                        bidText: row.querySelector('.bid-tag')?.textContent || '',
+                                      };
+                                    }"""
+                                )
+                                self.assertEqual(layer_metrics['bidText'], 'B01')
+                                self.assertGreater(layer_metrics['bid'], 12, f'B01 crushed: {layer_metrics}')
+                                self.assertGreater(layer_metrics['txt'], 20, f'Layer text crushed: {layer_metrics}')
+                                self.assertGreater(layer_metrics['pill'], 16, f'Status pill crushed: {layer_metrics}')
+
+                                # Verify Font Profile panel is visible under Bubbles/Layers with all controls
+                                self.assertTrue(tab.locator('#profilePanel').is_visible())
+                                self.assertTrue(tab.locator('#presetSelect').is_visible())
+                                self.assertTrue(tab.locator('[data-cmd=applyPreset]').is_visible())
+                                self.assertTrue(tab.locator('[data-cmd=editPreset]').is_visible())
+                                self.assertTrue(tab.locator('[data-cmd=newPreset]').is_visible())
+
+                                # Verify all 9 bilingual frame type labels in Inspector dropdown
+                                frame_labels = tab.locator('#frame option').all_text_contents()
+                                self.assertEqual(len(frame_labels), 9)
+                                self.assertIn('normal — ปกติ (คำพูดทั่วไป)', frame_labels)
+                                self.assertIn('terrible — น่ากลัว / กดดัน / สยองขวัญ', frame_labels)
+
                                 # Test OCR Options Modal (key '1') opens & remembers lang/engine in session
                                 tab.keyboard.press('1')
                                 tab.locator('#ocrLang').wait_for(state='visible')
@@ -446,7 +511,7 @@ class StudioPersistenceTests(unittest.TestCase):
                                 self.assertTrue(json_out.is_file())
                                 self.assertTrue(tab.locator('#notice .btn-reveal').is_visible())
 
-                                # Test TXT Modal (T): switch format & Save _ocr.txt via Save As
+                                # Test TXT Modal (T): switch format, Save _ocr.txt via Save As, and Import translation back!
                                 tab.keyboard.press('t')
                                 tab.locator('#txtArea').wait_for()
                                 tab.locator('#txtMode').select_option('numbered')
@@ -457,7 +522,15 @@ class StudioPersistenceTests(unittest.TestCase):
                                     tab.locator('#modal button', has_text='บันทึก _ocr.txt').click()
                                     tab.wait_for_function("() => document.getElementById('notice').textContent.includes('บันทึก TXT แล้ว')", timeout=15000)
                                 self.assertTrue(txt_saved.is_file())
-                                tab.locator('#close').click()
+                                tab.locator('#txtArea').fill('1. คำแปลนำเข้าทดสอบ\n2. รอด้วยนะ')
+                                tab.locator('#txtImportBtn').click()
+                                tab.locator('#dialog').wait_for(state='hidden', timeout=20000)
+                                tab.wait_for_function("() => document.getElementById('notice').textContent.includes('นำเข้าคำแปลสำเร็จ')", timeout=15000)
+                                self.assertEqual(tab.locator('#thai').input_value(), 'คำแปลนำเข้าทดสอบ')
+                                # In Text view, NO status badges or blue coord HUD should obstruct Thai text on canvas
+                                self.assertEqual(tab.locator('.bubble .badge').count(), 0)
+                                self.assertEqual(tab.locator('.bubble .hud').count(), 0)
+                                self.assertTrue(tab.locator('#coordInfo').text_content().strip())
 
                                 # Test Mask Edit Mode (M) -> paint -> Preview -> ตกลง
                                 tab.locator('#layers .layer button').first.click()

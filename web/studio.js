@@ -1,9 +1,21 @@
 'use strict';
 const $=id=>document.getElementById(id), el=(tag,txt)=>Object.assign(document.createElement(tag),{textContent:txt??''});
 const btn=(text,fn)=>{let b=el('button',text);b.onclick=()=>run(fn);return b};
-let key='',pages=[],fonts=[],n=0,id='',view='original',zoom=1,move=false,drawFrame=false,maskEdit=false,maskPreviewOn=false,hasMaskPreview=false,prevView='clean',erase=false,revision=0,busy=false,jsonPath='';
+let key='',pages=[],fonts=[],fontPresets={},selectedPreset=localStorage.getItem('studio-preset')||'',n=0,id='',view='original',zoom=1,move=false,drawFrame=false,maskEdit=false,maskPreviewOn=false,hasMaskPreview=false,prevView='clean',erase=false,revision=0,busy=false,jsonPath='';
 let ocrLang=sessionStorage.getItem('studio-ocr-lang')||'ko+en';
 let ocrEngine=sessionStorage.getItem('studio-ocr-engine')||'rapid';
+const FRAME_OPTIONS=[
+ ['normal','normal — ปกติ (คำพูดทั่วไป)'],
+ ['shout','shout — ตะโกน / แอ็กชัน'],
+ ['thought','thought — ความคิดในใจ'],
+ ['system','system — หน้าต่างระบบ'],
+ ['narration','narration — กล่องบรรยาย'],
+ ['floating','floating — ข้อความลอย / เสียงประกอบ'],
+ ['happy','happy — ดีใจ / สดใส'],
+ ['phone','phone — โทรศัพท์ / แชต'],
+ ['terrible','terrible — น่ากลัว / กดดัน / สยองขวัญ']
+];
+const FRAME_SHORT={normal:'normal · ปกติ',shout:'shout · ตะโกน',thought:'thought · ความคิด',system:'system · ระบบ',narration:'narration · บรรยาย',floating:'floating · ลอย/SFX',happy:'happy · สดใส',phone:'phone · แชต',terrible:'terrible · กดดัน'};
 const page=()=>pages[n], bubble=()=>page()?.bubbles.find(b=>b.id===id), layer=()=>bubble()?.text_layer||{};
 const bubbleIndex=b=>(page()?.bubbles||[]).findIndex(x=>x.id===b?.id);
 const bubbleCode=b=>{let i=bubbleIndex(b);return i>=0?'B'+String(i+1).padStart(2,'0'):(b?.id||'')};
@@ -46,10 +58,29 @@ async function flush(){
  await chain
 }
 function statusOf(b){
- if((b.score??1)<0.9)return {cls:'st-low',label:'OCR '+Math.round((b.score||0)*100)+'%'};
- if(!(b.translation||'').trim())return {cls:'st-untranslated',label:'รอแปล'};
- return {cls:'st-ready',label:'แปลแล้ว'};
+ if((b.score??1)<0.9)return {cls:'st-low',label:'OCR '+Math.round((b.score||0)*100)+'%',pill:'OCR '+Math.round((b.score||0)*100)+'%'};
+ if(!(b.translation||'').trim())return {cls:'st-untranslated',label:'รอแปล',pill:'รอแปล'};
+ return {cls:'st-ready',label:'แปลแล้ว',pill:'OK'};
 }
+async function loadPresets(){
+ try{
+  const res=await api('font-presets');
+  fontPresets=res.presets||{};
+  if(!fonts.length&&res.fonts)fonts=res.fonts;
+  renderPresets();
+ }catch{}
+}
+function renderPresets(){
+ let sel=$('presetSelect');if(!sel)return;
+ const names=Object.keys(fontPresets);
+ sel.replaceChildren(...names.map(x=>new Option(x,x)));
+ if(names.length){
+  if(!selectedPreset||!fontPresets[selectedPreset])selectedPreset=names[0];
+  sel.value=selectedPreset;
+  localStorage.setItem('studio-preset',selectedPreset);
+ }
+}
+$('presetSelect').onchange=()=>{selectedPreset=$('presetSelect').value;localStorage.setItem('studio-preset',selectedPreset)};
 function isTextTransform(b){
  return !maskEdit && view==='thai' && !!(b&&b.translation&&b.translation.trim())
 }
@@ -94,16 +125,18 @@ function sidebar(){
  $('layers').replaceChildren();page()?.bubbles.forEach((b,i)=>{
   let line=el('div');line.className='layer';let l=b.text_layer||{};
   let st=statusOf(b), code='B'+String(i+1).padStart(2,'0');
-  let txt=b.translation||b.text||'…';
+  let txt=(b.translation||b.text||'…').replace(/\s+/g,' ').trim();
   let hasFx=!!(l.stroke?.enabled||l.gradient?.enabled);
+  let isSel=id===b.id;
   let c=btn('',()=>selectBubble(b.id));
-  let dot=el('i');dot.className='dot '+(id===b.id?'st-selected':st.cls);
+  c.className='layer-main'+(isSel?' active':'');
+  let dot=el('i');dot.className='dot '+(isSel?'st-selected':st.cls);
   let tagId=el('span',code);tagId.className='bid-tag';
   let tagTxt=el('span',txt);tagTxt.className='layer-txt';
-  c.append(dot,tagId,tagTxt);
+  let pill=el('span',isSel?'เลือกอยู่':st.pill);pill.className='st-pill '+(isSel?'st-selected':st.cls);
+  c.append(dot,tagId,tagTxt,pill);
   if(hasFx){let fx=el('span','fx');fx.className='fx-tag';c.append(fx)}
-  c.title=code+'  '+txt+' · '+(b.frame_type||'normal')+' ('+st.label+')';
-  c.classList.toggle('active',id===b.id);
+  c.title=code+'  '+txt+' · '+(FRAME_SHORT[b.frame_type||'normal']||b.frame_type||'normal')+' ('+st.label+')';
   let eye=btn(l.hidden?'○':'◉',async()=>{await selectBubble(b.id);queueEdit({hidden:!l.hidden});await flush()});eye.className='eye';eye.title=l.hidden?'แสดงข้อความ':'ซ่อนข้อความ';
   let del=btn('🗑',()=>deleteBubbleById(b.id));del.className='del';del.title='ลบกรอบนี้ (Del)';
   line.append(c,eye,del);$('layers').append(line)
@@ -161,6 +194,14 @@ function family(font){
  }
  return loadedFonts.get(font)
 }
+function updateCoordInfo(){
+ let node=$('coordInfo'),b=bubble();if(!node||!b)return;
+ let l=b.text_layer||{}, textMode=isTextTransform(b);
+ let rect=textMode?bounds(b):b.box,[x,y,r,bt]=rect;
+ node.textContent=textMode
+  ? `พิกัด ${Math.round(x)}, ${Math.round(y)} · ขนาด ${Math.round(r-x)}×${Math.round(bt-y)} · ฟอนต์ ${Math.round(l.font_size||24)} px`
+  : `กรอบ ${Math.round(x)}, ${Math.round(y)} · ${Math.round(r-x)}×${Math.round(bt-y)} px`;
+}
 function draw(){
  const p=page();if(!p)return;let st=$('stage'),w=p.width*zoom,h=p.height*zoom;
  st.style.width=w+'px';st.style.height=h+'px';st.style.marginTop=Math.max(0,($('viewport').clientHeight-h)/2)+'px';$('percent').textContent=Math.round(zoom*100)+'%';
@@ -183,36 +224,41 @@ function draw(){
   let s=l.stroke,g=l.gradient;
   if(textMode&&s?.enabled){label.style.webkitTextStroke=2*s.size*zoom+'px '+rgb(s.color);label.style.paintOrder='stroke fill'}
   if(textMode&&g?.enabled){label.style.backgroundImage='linear-gradient('+(g.angle===90?'to top':'to right')+','+rgb(g.start_color)+','+rgb(g.end_color)+')';label.style.backgroundClip='text';label.style.webkitTextFillColor='transparent'}
-  let badge=el('small','B'+String(idx+1).padStart(2,'0')+' · '+(b.id===id?'เลือกอยู่':stInfo.label));
-  badge.className='badge';
-  div.append(label,badge);ov.append(div);
+  div.append(label);
+  // Show corner status badge only in ต้นฉบับ / คลีน views — keep Text view completely unobstructed!
+  if(!showText){
+   let badge=el('small','B'+String(idx+1).padStart(2,'0')+' · '+(b.id===id?'เลือกอยู่':stInfo.label));
+   badge.className='badge';div.append(badge)
+  }
+  ov.append(div);
   if(b.id===id){
    div.classList.add('selected');
    if(move&&!maskEdit){
     for(const [handle,hx,hy] of [['nw',0,0],['n',50,0],['ne',100,0],['e',100,50],['se',100,100],['s',50,100],['sw',0,100],['w',0,50]]){
      let a=el('i');a.className='handle';a.dataset.handle=handle;Object.assign(a.style,{left:hx+'%',top:hy+'%',cursor:handle+'-resize'});div.append(a)}
-    let hudTxt=textMode?(Math.round(x)+', '+Math.round(y)+' · '+Math.round(l.font_size||24)+' px'):(Math.round(x)+', '+Math.round(y)+' · '+Math.round(r-x)+'×'+Math.round(bt-y));
-    let hud=el('small',hudTxt);hud.className='hud';div.append(hud)
    }
   }
- })
+ });
+ updateCoordInfo()
 }
-function fillSelect(node,values,v){node.replaceChildren(...values.map(x=>new Option(x,x)));node.value=v}
+function fillSelect(node,values,v){node.replaceChildren(...values.map(x=>Array.isArray(x)?new Option(x[1],x[0]):new Option(x,x)));node.value=v}
 function inspect(){
  let host=$('inspector'),b=bubble();host.replaceChildren();if(!b){host.append(el('p','เลือกกรอบบนภาพหรือในรายการ Layers'));return}
  host.append($('fields').content.cloneNode(true));let l=b.text_layer||{},s=l.stroke||{},g=l.gradient||{};
  $('bid').textContent=bubbleCode(b);$('bid').title=b.id;
- $('frameBadge').textContent=b.frame_type||'normal';
+ let ft=b.frame_type||'normal';
+ $('frameBadge').textContent=FRAME_SHORT[ft]||ft;
  let pct=Math.round((b.score??1)*100);
  $('score').textContent='OCR '+pct+'%';
  $('score').className=pct<90?'score-low':'score-ok';
- fillSelect($('frame'),['normal','shout','thought','system','narration','floating','happy','phone','terrible'],b.frame_type||'normal');
+ fillSelect($('frame'),FRAME_OPTIONS,ft);
  fillSelect($('font'),fonts,b.font_choice);$('source').value=b.text;$('thai').value=b.translation;$('ink').value=rgb(l.color);$('rotation').value=l.rotation||0;$('align').value=l.alignment||'center';$('size').value=l.font_size||24;$('sizeValue').value=$('size').value;
+ updateCoordInfo();
  $('stroke').checked=!!s.enabled;$('edge').value=rgb(s.color);$('width').value=s.size||3;$('gradient').checked=!!g.enabled;$('start').value=rgb(g.start_color||[255,255,255]);$('end').value=rgb(g.end_color||[200,200,200]);$('angle').value=g.angle??90;
  $('thai').oninput=()=>{b.translation=$('thai').value;l.text=b.translation;queueEdit({translation:b.translation});sidebar();draw()};
  $('source').oninput=()=>{b.text=$('source').value;queueEdit({text:b.text});sidebar()};
  $('font').onchange=()=>{b.font_choice=$('font').value;queueEdit({font_choice:b.font_choice});draw()};
- $('frame').onchange=()=>{b.frame_type=$('frame').value;$('frameBadge').textContent=b.frame_type;queueEdit({frame_type:b.frame_type})};
+ $('frame').onchange=()=>{b.frame_type=$('frame').value;$('frameBadge').textContent=FRAME_SHORT[b.frame_type]||b.frame_type;queueEdit({frame_type:b.frame_type})};
  function edit(k,v){l[k]=v;queueEdit({[k]:v});draw()}
  $('align').onchange=()=>edit('alignment',$('align').value);$('ink').oninput=()=>edit('color',triplet($('ink').value));$('rotation').onchange=()=>edit('rotation',+$('rotation').value);
  $('size').oninput=()=>{let v=+$('size').value;$('sizeValue').value=v;edit('font_size',v)};
@@ -409,7 +455,56 @@ $('viewport').onpointerup=e=>{
 };
 $('viewport').onpointercancel=()=>{drag=null;$('paint').width=1;run(async()=>{if(key){pages=(await api(key+'/state')).pages;refresh()}})};
 $('viewport').onwheel=e=>{if(e.ctrlKey){e.preventDefault();scale(zoom*(e.deltaY>0?.9:1.1))}};
-function side(which){let node=$(which);node.hidden=!node.hidden;document.querySelector('main').style.setProperty('--'+which,node.hidden?'0px':which==='left'?'248px':'320px')}
+function side(which){let node=$(which);node.hidden=!node.hidden;document.querySelector('main').style.setProperty('--'+which,node.hidden?'0px':which==='left'?'268px':'320px')}
+async function applyFontPreset(){
+ if(!key||!pages.length){info('เปิดโปรเจกต์ก่อนจัดฟอนต์ตามโปรไฟล์');return}
+ const preset=$('presetSelect')?.value||selectedPreset;
+ await withBusy(async()=>{
+  const res=await api(key+'/apply-font-preset',{preset,all_pages:true});
+  pages=res.pages;if(!bubble())id=page()?.bubbles[0]?.id||'';
+  view='thai';revision++;refresh();info(res.note)
+ },'กำลังจัดฟอนต์ตามโปรไฟล์…')
+}
+async function openPresetEditor(isNew=false){
+ if(!Object.keys(fontPresets).length)await loadPresets();
+ const current=$('presetSelect')?.value||selectedPreset||Object.keys(fontPresets)[0]||'1. มังฮวาเกาหลี';
+ const baseMap=fontPresets[current]||{};
+ let m=modal(isNew?'เพิ่มโปรไฟล์ฟอนต์ใหม่':'ตั้งค่าฟอนต์ — '+current);
+ let nameInput=null;
+ if(isNew){
+  let lbl=el('label','ชื่อโปรไฟล์ใหม่');
+  nameInput=el('input');nameInput.id='newPresetName';nameInput.placeholder='เช่น 3. โรแมนซ์ / แฟนตาซี';
+  lbl.append(nameInput);m.append(lbl)
+ }
+ let grid=el('div');grid.className='preset-grid';
+ const selects={};
+ for(const [ftype,flabel] of FRAME_OPTIONS){
+  let row=el('div');row.className='preset-row';
+  row.append(el('small',flabel));
+  let s=el('select');s.dataset.ftype=ftype;
+  fillSelect(s,fonts,baseMap[ftype]||fonts[0]||'TH Sarabun New Bold');
+  selects[ftype]=s;row.append(s);grid.append(row)
+ }
+ let status=el('p','');
+ let actions=el('div');actions.className='modal-actions';
+ let cancelBtn=btn('ยกเลิก',()=>$('dialog').close());
+ let saveBtn=btn(isNew?'สร้างและบันทึกโปรไฟล์':'บันทึกโปรไฟล์',async()=>{
+  const name=isNew?nameInput.value.trim():current;
+  if(!name){status.className='err-note';status.textContent='กรุณาระบุชื่อโปรไฟล์ก่อนบันทึก';nameInput?.focus();return}
+  saveBtn.disabled=true;
+  try{
+   const mapping={};for(const [k,s] of Object.entries(selects))mapping[k]=s.value;
+   const res=await api('font-presets',{name,mapping});
+   fontPresets=res.presets;selectedPreset=res.name;renderPresets();
+   info(res.note);$('dialog').close()
+  }catch(err){status.className='err-note';status.textContent=err.message}
+  finally{saveBtn.disabled=false}
+ });
+ saveBtn.className='primary';saveBtn.id='savePresetBtn';
+ actions.append(cancelBtn,saveBtn);
+ m.append(grid,status,actions);
+ if(nameInput)nameInput.focus()
+}
 const commands={
  ocrOptions:['1 OCR ทุกหน้า (เลือกภาษาและโมเดล)',openOcrModal,'1'],
  batchMask:['2 Mask ทุกหน้า',()=>batch('mask',{},'original'),'2'],
@@ -418,6 +513,9 @@ const commands={
  addFrame:['สร้างกรอบบอลลูนใหม่',async()=>{if(!page())return;if(maskEdit)await cancelMaskEdit(true);move=false;drawFrame=!drawFrame;bars();draw();info(drawFrame?'ลากบนภาพเพื่อวาดกรอบใหม่ (กด Esc เพื่อยกเลิก)':'')},'N'],
  deleteFrame:['ลบกรอบที่เลือก',()=>{if(!bubble()){info('เลือกกรอบก่อนลบ');return}return deleteBubbleById(id)},'Del'],
  rapidBubble:['RapidOCR ช่องนี้',()=>{if(!bubble()){info('เลือกกรอบข้อความก่อนอ่าน RapidOCR');return}return command('ocr_bubble',false,{lang:ocrLang})},''],
+ applyPreset:['จัดฟอนต์ตามโปรไฟล์',applyFontPreset,''],
+ editPreset:['ตั้งค่าฟอนต์โปรไฟล์',()=>openPresetEditor(false),''],
+ newPreset:['เพิ่มโปรไฟล์ฟอนต์ใหม่',()=>openPresetEditor(true),''],
  maskEdit:['แก้ Mask รายช่อง',()=>maskEdit?cancelMaskEdit():startMaskEdit(),'M'],
  maskUndo:['ย้อน Mask',undoMaskEdit,''],
  maskPreview:['Preview Clean รายช่อง',previewMaskEdit,''],
@@ -522,22 +620,41 @@ async function openTxtModal(){
    info(res.note,res.path)
   }finally{saveBtn.disabled=false}
  });
- let loadBtn=btn('เปิดไฟล์ .txt',()=>$('txtFile').click());
+ let loadBtn=btn('เปิดไฟล์ .txt',async()=>{
+  loadBtn.disabled=true;
+  try{
+   const res=await api('open-txt',{});
+   if(!res||res.cancelled)return;
+   area.value=res.text;
+   status.className='';status.textContent='โหลดไฟล์ '+res.filename+' แล้ว — กด "นำเข้าคำแปลกลับเข้าโปรเจกต์"'
+  }catch{
+   $('txtFile').click()
+  }finally{loadBtn.disabled=false}
+ });
  $('txtFile').onchange=async()=>{
   let f=$('txtFile').files[0];if(!f)return;
   area.value=await f.text();$('txtFile').value='';
-  status.textContent='โหลดไฟล์ '+f.name+' แล้ว — กด "นำเข้าคำแปลกลับเข้าโปรเจกต์"'
+  status.className='';status.textContent='โหลดไฟล์ '+f.name+' แล้ว — กด "นำเข้าคำแปลกลับเข้าโปรเจกต์"'
  };
  let importBtn=btn('นำเข้าคำแปลกลับเข้าโปรเจกต์',async()=>{
+  if(!area.value.trim()){
+   status.className='err-note';status.textContent='กรุณาวางคำแปลหรือเปิดไฟล์ .txt ก่อนนำเข้า';return
+  }
   importBtn.disabled=true;
+  importBtn.textContent='กำลังนำเข้าและจัดวาง…';
+  status.className='';status.textContent='กำลังจับคู่คำแปลและจัดวางข้อความ…';
   try{
    const res=await api(key+'/txt/import',{text:area.value});
    pages=res.pages;if(!bubble())id=page()?.bubbles[0]?.id||'';
    view='thai';revision++;refresh();
-   status.textContent=res.note;info(res.note);
-   $('dialog').close()
-  }catch(err){status.textContent='นำเข้าไม่สำเร็จ: '+err.message}
-  finally{importBtn.disabled=false}
+   $('dialog').close();
+   info(res.note)
+  }catch(err){
+   status.className='err-note';
+   status.textContent='นำเข้าไม่สำเร็จ: '+err.message;
+   info('นำเข้าคำแปลไม่สำเร็จ: '+err.message)
+  }
+  finally{importBtn.disabled=false;importBtn.textContent='นำเข้าคำแปลกลับเข้าโปรเจกต์'}
  });
  importBtn.className='primary';importBtn.id='txtImportBtn';
  bar.append(fmt,copyBtn,saveBtn,loadBtn);
@@ -627,4 +744,4 @@ document.onkeydown=e=>{
  }
 };
 refresh();
-run(async()=>{let last=localStorage.getItem('studio-project');if(last){let record=(await api('projects')).find(x=>x[0]===last);if(record)await project(...record)}});
+run(async()=>{await loadPresets();let last=localStorage.getItem('studio-project');if(last){let record=(await api('projects')).find(x=>x[0]===last);if(record)await project(...record)}});

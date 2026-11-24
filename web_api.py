@@ -27,11 +27,19 @@ import manhwa_ocr as core
 from bubble_cleaner import Cleaner, compose_page, prepare_region, encode_region, decode_region, encode_patch
 from clean_quality import clean_checked
 from text_layout import (
+    DEFAULT_FONT_PRESETS,
     FONT_CHOICES,
+    FONT_NAME,
+    FRAME_TYPES,
+    FRAME_TYPE_LABELS,
+    classify_bubble_type,
     detect_and_parse_translations,
     export_source_script,
     layout_text,
+    load_font_presets,
+    normalize_font_choice,
     resolve_font,
+    save_font_presets,
     validate_layer,
 )
 from text_style_sampler import effects, sample_style
@@ -403,6 +411,155 @@ def reveal_path(d: dict):
     return dict(ok=True, path=opened)
 
 
+@app.post('/api/open-txt')
+def open_txt_file(d: dict | None = None):
+    d = d or {}
+    if d.get('path'):
+        chosen = Path(d['path'])
+    else:
+        chosen = _pick_open_path([('Text file', '*.txt')], title='เปิดไฟล์คำแปล (.txt)')
+    if chosen is None:
+        return dict(cancelled=True)
+    chosen = chosen.resolve()
+    if not chosen.is_file():
+        raise ValueError(f'ไม่พบไฟล์: {chosen}')
+    content = chosen.read_text(encoding='utf-8-sig')
+    return dict(cancelled=False, path=str(chosen), filename=chosen.name, text=content)
+
+
+@app.get('/api/font-presets')
+def get_font_presets():
+    presets = load_font_presets()
+    return dict(
+        presets=presets,
+        fonts=list(FONT_CHOICES),
+        frame_types=[dict(key=k, label=v) for k, v in FRAME_TYPES],
+    )
+
+
+@app.post('/api/font-presets')
+def update_font_presets(d: dict):
+    with lock:
+        presets = load_font_presets()
+        delete_name = str(d.get('delete') or '').strip()
+        if delete_name:
+            if delete_name not in presets:
+                raise ValueError(f'ไม่พบโปรไฟล์ฟอนต์ "{delete_name}"')
+            if len(presets) <= 1:
+                raise ValueError('ต้องเหลือโปรไฟล์ฟอนต์อย่างน้อย 1 รายการ')
+            del presets[delete_name]
+            save_font_presets(presets)
+            return dict(presets=load_font_presets(), name=next(iter(presets)), note=f'ลบโปรไฟล์ฟอนต์ "{delete_name}" แล้ว')
+        name = str(d.get('name') or '').strip()
+        if not name:
+            raise ValueError('กรุณาตั้งชื่อโปรไฟล์ฟอนต์')
+        raw_map = d.get('mapping')
+        if not isinstance(raw_map, dict):
+            base_name = str(d.get('base') or '').strip()
+            raw_map = dict(presets.get(base_name) or DEFAULT_FONT_PRESETS['1. มังฮวาเกาหลี'])
+        cleaned = {k: normalize_font_choice(raw_map.get(k, FONT_NAME)) for k, _ in FRAME_TYPES}
+        presets[name] = cleaned
+        save_font_presets(presets)
+        return dict(presets=load_font_presets(), name=name, note=f'บันทึกโปรไฟล์ฟอนต์ "{name}" แล้ว')
+
+
+@app.post('/api/{key}/apply-font-preset')
+def apply_font_preset(key: str, d: dict):
+    with lock:
+        pages, masks = load(key)
+        if not pages:
+            raise ValueError('ยังไม่มีหน้าการ์ตูนในโปรเจกต์')
+        presets = load_font_presets()
+        preset_name = str(d.get('preset') or '').strip()
+        if not preset_name or preset_name not in presets:
+            preset_name = next(iter(presets))
+        raw_map = presets.get(preset_name) or DEFAULT_FONT_PRESETS['1. มังฮวาเกาหลี']
+
+        fallback_font = FONT_NAME
+        normal_candidate = normalize_font_choice(raw_map.get('normal', FONT_NAME))
+        try:
+            resolve_font(normal_candidate)
+            fallback_font = normal_candidate
+        except Exception:
+            pass
+
+        resolved_map = {}
+        missing_fonts = set()
+        for fkey, font_wanted in raw_map.items():
+            canon = normalize_font_choice(font_wanted)
+            try:
+                resolve_font(canon)
+                resolved_map[fkey] = canon
+            except Exception:
+                missing_fonts.add(canon)
+                resolved_map[fkey] = fallback_font
+
+        all_pages = bool(d.get('all_pages', True))
+        if all_pages:
+            targets = [p for p in pages if p.bubbles]
+        else:
+            p_idx = int(d.get('page', 0))
+            pg, _ = find(pages, p_idx, None)
+            targets = [pg] if pg.bubbles else []
+
+        total = 0
+        laid_out = 0
+        failed = 0
+        for p in targets:
+            raw_im = core.load_image(p.path)
+            work_im = compose_page(raw_im, p.clean_patches) if p.clean_patches else raw_im
+            for b in p.bubbles:
+                total += 1
+                ftype = classify_bubble_type(raw_im, b)
+                chosen_font = resolved_map.get(ftype, fallback_font)
+                b.frame_type = ftype
+                b.font_choice = chosen_font
+                b.custom_size = 0
+                b.custom_width = 0
+                b.text_offset = []
+                b.custom_rotation = None
+                if b.translation.strip():
+                    prev_fx = {k: b.text_layer[k] for k in ('stroke', 'gradient', 'manual_effects') if b.text_layer and k in b.text_layer}
+                    try:
+                        layer = layout_text(
+                            raw_im if b.engine == 'MTP' else work_im,
+                            b,
+                            b.translation,
+                            font_choice=chosen_font,
+                            original=raw_im,
+                            cleaned=work_im if p.clean_patches else None,
+                            custom_size=0,
+                            custom_width=0,
+                            text_offset=[],
+                            custom_rotation=None,
+                        )
+                        x0, y0, x1, y1 = layer['box']
+                        w, h = layer.get('text_size', (x1 - x0, y1 - y0))
+                        layer['editor_box'] = [(x0 + x1 - w) / 2, (y0 + y1 - h) / 2, (x0 + x1 + w) / 2, (y0 + y1 + h) / 2]
+                        if prev_fx.get('manual_effects'):
+                            layer.update(prev_fx)
+                        validate_layer(layer)
+                        b.text_layer = layer
+                        laid_out += 1
+                    except Exception:
+                        failed += 1
+        save(key, '', pages, masks)
+        note = f'จัดฟอนต์ตามโปรไฟล์ "{preset_name}" สำเร็จ {laid_out}/{total} บอลลูน'
+        if failed:
+            note += f' (จัดวางไม่สำเร็จ {failed})'
+        if missing_fonts:
+            note += f' • ใช้ฟอนต์สำรองแทน {", ".join(sorted(missing_fonts))}'
+        return dict(
+            pages=[summary(p) for p in pages],
+            preset=preset_name,
+            total=total,
+            laid_out=laid_out,
+            failed=failed,
+            missing_fonts=sorted(missing_fonts),
+            note=note,
+        )
+
+
 @app.get('/api/{key}/state')
 def state(key: str):
     pages, _ = load(key)
@@ -733,8 +890,10 @@ def import_txt(key: str, d: dict):
         raw = str(d.get('text', ''))
         changes, report = detect_and_parse_translations(raw, pages)
         if not changes:
-            raise ValueError('ไม่พบคำแปลที่จับคู่กับกรอบในโปรเจกต์นี้')
+            raise ValueError('ไม่พบคำแปลที่จับคู่กับกรอบในโปรเจกต์นี้ — ตรวจรูปแบบรหัสกรอบหรือเลขข้อ')
         frame_tags = report.get('frame_tags') or {}
+        laid_out = 0
+        layout_failed = 0
         for p in pages:
             im = None
             for b in p.bubbles:
@@ -742,16 +901,32 @@ def import_txt(key: str, d: dict):
                     continue
                 if im is None:
                     im = core.load_image(p.path)
-                payload = {'translation': changes[b.id]}
+                b.translation = changes[b.id]
                 if b.id in frame_tags:
-                    payload['frame_type'] = frame_tags[b.id]
-                text_update(im, p, b, payload)
+                    b.frame_type = frame_tags[b.id]
+                    b.frame_type_locked = True
+                # Reset stale manual box so newly imported Thai text centers cleanly
+                b.text_layer = {}
+                b.custom_size = 0
+                b.custom_width = 0
+                b.text_offset = []
+                b.custom_rotation = None
+                try:
+                    text_update(im, p, b, {'translation': b.translation})
+                    laid_out += 1
+                except Exception:
+                    layout_failed += 1
         save(key, '', pages, masks)
+        note = f'นำเข้าคำแปลสำเร็จ {len(changes)}/{report["total_bubbles"]} บอลลูน'
+        if layout_failed:
+            note += f' (จัดวางอัตโนมัติไม่สำเร็จ {layout_failed})'
         return dict(
             pages=[summary(p) for p in pages],
             report=report,
             applied=len(changes),
-            note=f'นำเข้าคำแปล {len(changes)}/{report["total_bubbles"]} กรอบ',
+            laid_out=laid_out,
+            layout_failed=layout_failed,
+            note=note,
         )
 
 
