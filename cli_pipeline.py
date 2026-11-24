@@ -1,5 +1,7 @@
 """Manhwa OCR Editor 4.0 batch entry point for an interactive Windows login."""
 import argparse
+from contextlib import nullcontext
+from time import perf_counter
 from dataclasses import asdict
 import json
 import os
@@ -271,10 +273,7 @@ def run(args):
             and psd_backend=='photopea'
             and export_psd is _real_export_psd
         )
-        pp_session = PhotopeaSession() if use_pp_session else None
-        try:
-            if pp_session is not None:
-                pp_session.start()
+        with (PhotopeaSession() if use_pp_session else nullcontext()) as pp_session:
             for i,page in enumerate(pages,1):
                 if not (write_png or write_psd):break
                 image=app.load_image(page.path)
@@ -282,17 +281,16 @@ def run(args):
                     composite_text_crop(compose_page(image,page.clean_patches),page.bubbles,(0,0)).save(output/f'{i:02}.png')
                     files_to_upload.append(output/f'{i:02}.png')
                 if write_psd:
+                    started = perf_counter()
                     if export_psd is _real_export_psd:
                         report=export_psd(image,page,output/f'{i:02}.psd',
                                           backend=psd_backend,session=pp_session)
                     else:
                         report=export_psd(image,page,output/f'{i:02}.psd')
+                    print(f'Exported {i:02}.psd ({perf_counter()-started:.2f}s)',flush=True)
                     files_to_upload.append(output/f'{i:02}.psd')
                     for warning in report.get('warnings',[]):print(warning,flush=True)
                 print(f'Export pages {100*i/len(pages):.0f}%',flush=True)
-        finally:
-            if pp_session is not None:
-                pp_session.close()
         if args.export_format in ('mtp','psd+mtp','all'):
             mtp_path=output/(drive.local_name(episode)+'.mtp' if args.drive_link else 'project.mtp')
             app.write_mtp(mtp_path,pages,fonts,cancel,emit)

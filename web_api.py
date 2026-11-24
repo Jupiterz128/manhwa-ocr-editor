@@ -12,7 +12,8 @@ import subprocess
 import threading
 import uuid
 import webbrowser
-from contextlib import closing
+from contextlib import closing, nullcontext
+from time import perf_counter
 from dataclasses import asdict
 from pathlib import Path
 
@@ -1428,7 +1429,7 @@ def stitch_project(key:str,d:dict):
 
 @app.post('/api/{key}/export')
 def export(key: str, d: dict):
-    from photoshop_export import export_psd
+    from photoshop_export import PhotopeaSession, export_psd
 
     pages, _ = load(key)
     fmt = d.get('format', 'psd')
@@ -1450,18 +1451,22 @@ def export(key: str, d: dict):
     def run():
         try:
             files = []
-            for i, p in enumerate(pages, 1):
-                for b in p.bubbles:
-                    if not d.get('fx', True) and b.text_layer:
-                        b.text_layer.update(effects())
-                if fmt != 'mtp':
-                    visible = copy.copy(p)
-                    visible.bubbles = [b for b in p.bubbles if not b.text_layer.get('hidden')]
-                    out = _unique_path(folder, f'{i:02}', '.psd')
-                    progress['status']=f'กำลังส่งออกหน้า {i}/{len(pages)} ผ่าน {d["backend"]}…'
-                    export_psd(core.load_image(p.path), visible, out, backend=d['backend'])
-                    files.append(out)
-                if fmt!='mtp':progress['value']=int(i*(80 if fmt=='all' else 95)/len(pages))
+            use_photopea = fmt != 'mtp' and d['backend'] == 'photopea'
+            with (PhotopeaSession() if use_photopea else nullcontext()) as session:
+                for i, p in enumerate(pages, 1):
+                    for b in p.bubbles:
+                        if not d.get('fx', True) and b.text_layer:
+                            b.text_layer.update(effects())
+                    if fmt != 'mtp':
+                        visible = copy.copy(p)
+                        visible.bubbles = [b for b in p.bubbles if not b.text_layer.get('hidden')]
+                        out = _unique_path(folder, f'{i:02}', '.psd')
+                        progress['status']=f'กำลังส่งออกหน้า {i}/{len(pages)} ผ่าน {d["backend"]}…'
+                        started = perf_counter()
+                        export_psd(core.load_image(p.path), visible, out, backend=d['backend'], session=session)
+                        print(f'Exported {out.name} ({perf_counter()-started:.2f}s)',flush=True)
+                        files.append(out)
+                    if fmt!='mtp':progress['value']=int(i*(80 if fmt=='all' else 95)/len(pages))
             if fmt != 'psd':
                 out = _unique_path(folder, stem if dest_dir else 'project', '.mtp')
                 progress['status']='กำลังบันทึก MTP…'
