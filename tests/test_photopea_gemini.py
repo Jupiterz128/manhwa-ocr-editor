@@ -83,6 +83,24 @@ class GeminiSinglePassTranslatorTests(unittest.TestCase):
         self.assertEqual([r['id'] for r in prompts[0]['chapter_context']], ['0','1','2'])
         self.assertEqual([r['thai'] for r in prompts[1]['chapter_context']], ['คำเดิม','คำใหม่',''])
 
+    def test_large_batch_repairs_only_missing_or_ambiguous_ids(self):
+        bubbles = [Bubble([0, 0, 40, 40], id=f'b{i}', text='Hi') for i in range(152)]
+        requests = []
+        def respond(**kwargs):
+            payload = json.loads(kwargs['contents'].split('\n', 1)[1])
+            ids = [item['id'] for item in payload['items']]
+            requests.append(ids)
+            rows = [{'id': bid, 'thai': 'แปล ' + bid} for bid in reversed(ids)]
+            if len(requests) == 1:
+                rows = rows[1:] + [rows[1], {'id': 'unknown', 'thai': 'ผิดกรอบ'}]
+            return SimpleNamespace(text=json.dumps({'translations': rows}))
+        client = MagicMock()
+        client.models.generate_content.side_effect = respond
+        with patch('google.genai.Client', return_value=client):
+            gt.translate_pages_with_gemini([Page('p', bubbles)], api_key='test', log=None)
+        self.assertEqual(requests[1:], [['b150', 'b151']])
+        self.assertTrue(all(b.translation == 'แปล ' + b.id for b in bubbles))
+
     def test_duplicate_result_id_rejected_before_applying(self):
         page = Page('p', [Bubble([0,0,30,30], id='a', text='Run!')])
         client = MagicMock()

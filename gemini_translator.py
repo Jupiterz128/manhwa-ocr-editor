@@ -132,6 +132,7 @@ def _call_gemini_batch(client, model, items, source_lang='ko+en', context_hint='
         payload['context'] = context_hint
     prompt = (
         'แปลข้อความในรายการ `items` ต่อไปนี้เป็นภาษาไทยให้ครบทุก `id` ในรอบเดียว '
+        'คัดลอก id ตามตัวอักษร แปลเฉพาะ items ส่วน chapter_context ใช้อ้างอิงเท่านั้น '
         'โดยรักษาความต่อเนื่องของบทสนทนาทั้งตอน:\n'
         + json.dumps(payload, ensure_ascii=False)
     )
@@ -154,17 +155,22 @@ def _call_gemini_batch(client, model, items, source_lang='ko+en', context_hint='
             rows = data.get('translations') if isinstance(data, dict) else data
             if not isinstance(rows, list):
                 raise ValueError('Gemini ไม่ส่งรายการ translations กลับมา')
+            expected = {item['id'] for item in items}
             result = {}
+            seen = set()
             for row in rows:
                 if not isinstance(row, dict) or not isinstance(row.get('id'), str):
-                    raise ValueError('Gemini ส่งรายการที่ไม่มีรหัสกรอบ')
+                    continue
                 bid = row['id']
+                if bid not in expected:
+                    continue
+                if bid in seen:
+                    result.pop(bid, None)
+                    continue
+                seen.add(bid)
                 thai = row.get('thai')
-                if bid in result or not isinstance(thai, str) or not thai.strip():
-                    raise ValueError('Gemini ส่งรหัสซ้ำหรือคำแปลว่าง')
-                result[bid] = thai.strip()
-            if set(result) != {item['id'] for item in items}:
-                raise ValueError('รหัสกรอบจาก Gemini ไม่ตรงกับรายการที่ส่งแปล')
+                if isinstance(thai, str) and extract_frame_tag(thai.strip())[1].strip():
+                    result[bid] = thai.strip()
             return result
         except Exception as exc:
             last_exc = exc
@@ -248,6 +254,7 @@ def translate_pages_with_gemini(
     tags = {}
     batch_size = max(1, int(max_batch_size or 200))
     batches = [candidates[i:i + batch_size] for i in range(0, len(candidates), batch_size)]
+    request_count = 0
     for batch_idx, batch in enumerate(batches, 1):
         if log:
             log(
@@ -258,18 +265,31 @@ def translate_pages_with_gemini(
                 f'Gemini translate ({model_name}) batch {batch_idx}/{len(batches)}: '
                 f'{len(batch)} bubbles...'
             )
-        translated = _call_gemini_batch(
-            client,
-            model_name,
-            batch,
-            source_lang=source_lang,
-            context_hint=context_hint,
-            translation_note=translation_note,
-            chapter_context=[
-                dict(item, thai=changes.get(item['id']) or getattr(bubble_by_id[item['id']], 'translation', ''))
-                for item in chapter
-            ] if len(batch) < len(chapter) else None,
-        )
+        translated = {}
+        pending = batch
+        for round_index in range(3):
+            limit = len(batch) if round_index == 0 else 16
+            for offset in range(0, len(pending), limit):
+                subset = pending[offset:offset + limit]
+                context = None
+                if len(subset) < len(chapter):
+                    context = [dict(item, thai=translated.get(item['id']) or changes.get(item['id'])
+                                    or getattr(bubble_by_id[item['id']], 'translation', ''))
+                               for item in chapter]
+                translated.update(_call_gemini_batch(
+                    client, model_name, subset, source_lang=source_lang, context_hint=context_hint,
+                    translation_note=translation_note, chapter_context=context))
+                request_count += 1
+            pending = [item for item in batch if item['id'] not in translated]
+            if not pending:
+                break
+            if log and round_index < 2:
+                log(f'Gemini จับคู่ได้ {len(translated)}/{len(batch)} กรอบ '
+                    f'กำลังขอเฉพาะ {len(pending)} กรอบที่ยังจับคู่ไม่ได้ (รอบแก้ {round_index + 1}/2)')
+        if pending:
+            sample = ', '.join(item['id'] for item in pending[:5])
+            raise ValueError(f'Gemini ยังจับคู่ไม่ได้ {len(pending)}/{len(batch)} กรอบหลังขอซ้ำ '
+                             f'(ตัวอย่าง ID: {sample})')
         for item in batch:
             bid = item['id']
             val = translated.get(bid, '').strip()
@@ -292,7 +312,7 @@ def translate_pages_with_gemini(
     if log:
         msg = (
             f'Gemini translated {len(changes)}/{len(candidates)} bubbles '
-            f'using {model_name} ({len(batches)} pass)'
+            f'using {model_name} ({request_count} pass)'
         )
         log(msg, flush=True) if log is print else log(msg)
     return {
@@ -300,6 +320,6 @@ def translate_pages_with_gemini(
         'total_candidates': len(candidates),
         'missing_ids': missing,
         'model': model_name,
-        'batches': len(batches),
+        'batches': request_count,
         'changes': changes,
     }
