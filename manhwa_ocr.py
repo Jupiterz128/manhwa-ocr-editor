@@ -1366,7 +1366,7 @@ class GoogleVisionOCR:
 
 
 def read_mtp(mtp_file, cancel, emit, extract_dir=None):
-    from text_layout import fast_direct_layer,normalize_font_choice,resolve_font
+    from text_layout import FRAME_TYPE_LABELS,extract_frame_tag,fast_direct_layer,normalize_font_choice,resolve_font
     emit(('log',f'กำลังอ่านไฟล์ .mtp: {mtp_file.name}…'))
     data=json.loads(mtp_file.read_text(encoding='utf-8-sig'))
     files_list=data.get('files')
@@ -1450,7 +1450,8 @@ def read_mtp(mtp_file, cancel, emit, extract_dir=None):
             src_txt=str(t_it.get('originalText') or t_it.get('text') or '').strip()
             trn_txt=str(t_it.get('translation') or (tl.get('text') if tl else '') or '').strip()
             ft_raw=str(t_it.get('fontType') or (tl.get('fontType') if tl else '') or 'normal').lower()
-            ftype=MTP_TYPE_TO_FRAME.get(ft_raw,'normal')
+            locked_type=t_it.get('studioLockedFrameType') or (tl.get('studioLockedFrameType') if tl else None)
+            ftype=locked_type if locked_type in FRAME_TYPE_LABELS else MTP_TYPE_TO_FRAME.get(ft_raw,'normal')
             raw_font=(tl.get('fontFamily') if tl else None) or font_reg.get(ft_raw) or DEFAULT_FONT_CHOICE
             f_choice=safe_font(raw_font)
 
@@ -1465,6 +1466,7 @@ def read_mtp(mtp_file, cancel, emit, extract_dir=None):
                 quad=q,
                 font_choice=f_choice,
                 frame_type=ftype,
+                frame_type_locked=locked_type in FRAME_TYPE_LABELS,
             )
             if tl is not None:
                 pref_sz=int(round(float(tl.get('fontSize') or tl.get('size') or 0)))
@@ -1499,7 +1501,8 @@ def read_mtp(mtp_file, cancel, emit, extract_dir=None):
                 engine='MTP',
                 reviewed=True,
                 font_choice=safe_font(tl.get('fontFamily') or DEFAULT_FONT_CHOICE),
-                frame_type=MTP_TYPE_TO_FRAME.get(ft_raw,'normal'),
+                frame_type=tl['studioLockedFrameType'] if tl.get('studioLockedFrameType') in FRAME_TYPE_LABELS else MTP_TYPE_TO_FRAME.get(ft_raw,'normal'),
+                frame_type_locked=tl.get('studioLockedFrameType') in FRAME_TYPE_LABELS,
             )
             pref_sz=int(round(float(tl.get('fontSize') or tl.get('size') or 0)))
             raw_rot=float(tl.get('rot') or 0.0)
@@ -1541,6 +1544,11 @@ def read_mtp(mtp_file, cancel, emit, extract_dir=None):
 
         work_im=compose_page(im,patches_out) if patches_out else im
         for b_obj in page_bubbles:
+            tag,translation=extract_frame_tag(b_obj.translation)
+            if tag:
+                b_obj.frame_type=tag
+                b_obj.frame_type_locked=True
+                b_obj.translation=translation
             if b_obj.translation.strip():
                 pref_sz,pref_xy,pref_rot=layer_hints.get(b_obj.id,(0,None,None))
                 try:
@@ -1600,6 +1608,7 @@ def write_mtp(path, tasks, preset_map, cancel, emit):
             mtp_ft={'thought':'think','narration':'narr_in','floating':'small','terrible':'scream','happy':'normal','phone':'normal'}.get(ft,ft)
             ocr_list.append({
                 'id':tid_num,'box':q,'text':b.text,'originalText':b.text,
+                **({'studioLockedFrameType':ft} if b.frame_type_locked else {}),
                 'translation':b.translation,'visible':True,'selected':False,'fontType':mtp_ft,
             })
             pt=patch_by_bid.get(b.id)
@@ -1616,6 +1625,7 @@ def write_mtp(path, tasks, preset_map, cancel, emit):
                 })
             ts_list.append({
                 'id':tid_num,'box':q,'text':b.text,'originalText':b.text,
+                **({'studioLockedFrameType':ft} if b.frame_type_locked else {}),
                 'translation':b.translation,'visible':True,'selected':False,
                 'type':'text','fontType':mtp_ft,'targetLayerId':layer_id,
                 'inpaintModel':None,'patchUrl':None,'patchExpansion':0,
@@ -1628,6 +1638,7 @@ def write_mtp(path, tasks, preset_map, cancel, emit):
                 tl_list.append({
                     **({'studioTextLayer':b.text_layer} if b.text_layer and 'editor_box' in b.text_layer else {}),
                     **{k:b.text_layer[k] for k in ('stroke','gradient','manual_effects') if b.text_layer and k in b.text_layer},
+                    **({'studioLockedFrameType':ft} if b.frame_type_locked else {}),
                     'id':layer_id,'type':'text','number':b_i,
                     'text':(b.text_layer.get('text') if b.text_layer else None) or b.translation,
                     'x':int(round((tb[0]+tb[2])/2.0)),'y':int(round((tb[1]+tb[3])/2.0)),
@@ -3267,6 +3278,8 @@ class ManhwaOCRApp:
                             if font_used:b.font_choice=font_used
                             if layer:
                                 b.text_layer=layer
+                                if b.engine=='MTP' and layer.get('bubble_box'):
+                                    b.box=list(layer['bubble_box'])
                                 if not font_used and layer.get('font_choice'):b.font_choice=layer['font_choice']
                                 b.text_offset=list(layer.get('text_offset',[]))
                                 if 'custom_rotation' in layer:b.custom_rotation=layer['custom_rotation']
@@ -4011,7 +4024,7 @@ class ManhwaOCRApp:
         self.commit_editor()
         if not self.pages or (not all_pages and not self.page()):
             messagebox.showinfo('ยังไม่มีหน้าการ์ตูน','เปิดภาพการ์ตูนและอ่าน OCR ก่อนจัดฟอนต์ตามกรอบ');return
-        from text_layout import (classify_bubble_type, layout_text, resolve_font,
+        from text_layout import (_bubble_interior_region, classify_bubble_type, layout_text, resolve_font,
                                  normalize_font_choice, FRAME_TYPE_LABELS, DEFAULT_FONT_PRESETS)
         preset_name=self.font_preset.get()
         raw_map=self.font_presets_map.get(preset_name) or DEFAULT_FONT_PRESETS['1. มังฮวาเกาหลี']
@@ -4055,21 +4068,40 @@ class ManhwaOCRApp:
                 if self.cancel.is_set():break
                 raw_im=load_image(path)
                 work_im=compose_page(raw_im,patches) if patches else raw_im
-                for b_idx,b in enumerate(bs):
+                anchors=[copy.copy(item) for item in bs]
+                for anchor in anchors:
+                    if anchor.engine=='MTP' and len(anchor.lines)==1 and anchor.lines[0].get('engine')=='MTP':
+                        anchor.box=anchor.lines[0]['box']
+                for b_idx,(b,anchor) in enumerate(zip(bs,anchors)):
                     if self.cancel.is_set():break
-                    ftype=quick_type or classify_bubble_type(raw_im,b)
+                    region=None
+                    if b.engine=='MTP':
+                        try:
+                            region=_bubble_interior_region(raw_im,anchor,anchors)
+                        except ValueError as exc:
+                            failed+=1
+                            results.append((pid,b.id,b.translation,{},str(exc),b.font_choice,b.frame_type,True,bool(quick_type or b.frame_type_locked)))
+                            continue
+                        roi,mask,found=region
+                        if found and np.any(mask):
+                            x,y,w,h=cv2.boundingRect(mask)
+                            b.box=[roi[0]+x,roi[1]+y,roi[0]+x+w,roi[1]+y+h]
+                    ftype=quick_type or classify_bubble_type(raw_im,b,refresh=True)
                     type_counts[ftype]=type_counts.get(ftype,0)+1
                     chosen_font=resolved_map.get(ftype,fallback_font)
                     b.frame_type=ftype
+                    if not b.frame_type_locked and not quick_type:
+                        b.detected_frame_type=ftype
                     b.font_choice=chosen_font
                     b.custom_size=0;b.custom_width=0;b.text_offset=[];b.custom_rotation=None
                     layer={};err=''
                     if b.translation.strip():
                         self.events.put(('log',f'[{preset_name}] {Path(path).name} กรอบ {b_idx+1}: [{FRAME_TYPE_LABELS.get(ftype,ftype)}] → จัดกึ่งกลางใหม่ด้วย {chosen_font}'))
                         try:
-                            layer=layout_text(raw_im if b.engine=="MTP" else work_im,b,b.translation,font_choice=chosen_font,
+                            layer=layout_text(work_im,b,b.translation,font_choice=chosen_font,
                                               original=raw_im,cleaned=work_im if patches else None,auto_stroke=auto_stroke,auto_gradient=auto_gradient,
-                                              custom_size=0,custom_width=0,text_offset=[],custom_rotation=None)
+                                              custom_size=0,custom_width=0,text_offset=[],custom_rotation=None,
+                                              page_bubbles=anchors,interior_region=region)
                             laid_out+=1
                         except Exception as exc:
                             err=str(exc);failed+=1

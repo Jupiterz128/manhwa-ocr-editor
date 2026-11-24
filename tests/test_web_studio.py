@@ -126,7 +126,7 @@ class StudioPersistenceTests(unittest.TestCase):
 
             def scan(self, image):
                 return [
-                    Bubble(box=[10, 10, 100, 80], text='SCANNED', score=0.95, engine='RapidOCR (PP-OCRv5)'),
+                    Bubble(box=[10, 10, 100, 80], text='SCANNED', frame_type='thought', detected_frame_type='thought', score=0.95, engine='RapidOCR (PP-OCRv5)'),
                     Bubble(box=[150, 20, 240, 120], text='', score=0.0, engine='detected / unread'),
                     Bubble(box=[250, 20, 340, 120], text='   ', score=0.0, engine='detected / unread'),
                 ]
@@ -151,13 +151,17 @@ class StudioPersistenceTests(unittest.TestCase):
             self.assertEqual(pages[0].bubbles[1].text, 'HELLO!')
             self.assertEqual(len(pages[0].bubbles[1].candidates), 2)
 
-            # Batch OCR uses legacy type_scan=False and filters out empty / OCR 0% false positives
+            # Batch OCR requests the 12-class region detector and filters out empty / OCR 0% false positives
             bres = studio.batch_action('ocrjob', 'ocr', {'replace': True, 'lang': 'zh+en', 'engine': 'paddle'})
-            self.assertEqual(calls[-1], ('zh+en', 'paddle', True, False))
+            self.assertEqual(calls[-1], ('zh+en', 'paddle', True, True))
             self.assertIn('paddle', bres['note'])
             self.assertIn('zh+en', bres['note'])
             self.assertEqual(len(bres['pages'][0]['bubbles']), 1)
             self.assertEqual(bres['pages'][0]['bubbles'][0]['text'], 'SCANNED')
+
+            scanned=studio.load('ocrjob')[0][0].bubbles[0]
+            self.assertEqual(scanned.detected_frame_type,'thought')
+            self.assertEqual(scanned.font_choice,studio.resolve_preset_font(studio.project_font_preset('ocrjob'),'thought')[0])
 
             # Manually created frames via + กรอบ are kept even when empty
             added = studio.action('ocrjob', 0, 'add_bubble', {'box': [20, 140, 150, 220]})

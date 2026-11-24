@@ -257,7 +257,7 @@ def run(args):
                     b.custom_size=b.custom_width=0
                     b.custom_rotation=None
                     b.text_offset=[]
-                    b.text_layer=layout_text(work,b,original=raw,cleaned=work if page.clean_patches else None,
+                    b.text_layer=layout_text(work,b,page_bubbles=page.bubbles,original=raw,cleaned=work if page.clean_patches else None,
                                              auto_stroke=args.auto_stroke,auto_gradient=args.auto_gradient)
             print(f'CLEAN / layout {100*i/len(pages):.0f}%',flush=True)
         checkpoint(output/'project.json',pages,drafts,args.preset)

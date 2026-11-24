@@ -268,7 +268,7 @@ class BubbleTypeDetector:
     def _infer(self,image,session,inp,classes,single=False):
         height,width=inp.shape[-2:]
         w,h=image.size
-        boxes=[];scores=[];types=[]
+        boxes=[];scores=[];nms_scores=[];types=[]
         for top in range(0,h,1280):
             bottom=h if single else min(top+1600,h)
             tile=image.crop((0,top,w,bottom)).convert('RGB').resize((width,height),Image.Resampling.BILINEAR)
@@ -283,11 +283,13 @@ class BubbleTypeDetector:
                 x0,x1=np.clip([cx-bw/2,cx+bw/2],0,1)*w
                 y0,y1=np.clip([cy-bh/2,cy+bh/2],0,1)*(bottom-top)+top
                 if x1>x0 and y1>y0:
+                    clipped=not single and ((top>0 and y0<=top+8) or (bottom<h and y1>=bottom-8))
                     boxes.append([float(x0),float(y0),float(x1-x0),float(y1-y0)])
                     scores.append(score)
+                    nms_scores.append(score*(.5 if clipped else 1.0))
                     types.append(classes[idx])
             if bottom==h:break
-        keep=cv2.dnn.NMSBoxes(boxes,scores,0.,.50)
+        keep=cv2.dnn.NMSBoxes(boxes,nms_scores,0.,.50)
         return [(boxes[i],scores[i],types[i]) for i in np.asarray(keep,dtype=int).ravel()]
 
     def match(self,image,box,gpu=False):
@@ -311,7 +313,7 @@ class BubbleTypeDetector:
 _BUBBLE_TYPE_DETECTOR=BubbleTypeDetector()
 
 
-def classify_bubble_type(image,bubble,gpu=False):
+def classify_bubble_type(image,bubble,gpu=False,*,refresh=False):
     tag,clean=extract_frame_tag(bubble.translation or '')
     if tag:
         bubble.translation=clean
@@ -320,10 +322,11 @@ def classify_bubble_type(image,bubble,gpu=False):
         return tag
     if getattr(bubble,'frame_type_locked',False) and bubble.frame_type in FRAME_TYPE_LABELS:
         return bubble.frame_type
-    if getattr(bubble,'detected_frame_type','') in FRAME_TYPE_LABELS:
+    if not refresh and getattr(bubble,'detected_frame_type','') in FRAME_TYPE_LABELS:
         return bubble.detected_frame_type
     prediction=_BUBBLE_TYPE_DETECTOR.match(image,bubble.box,gpu)
-    if prediction:return prediction
+    if prediction and (not refresh or prediction not in ('normal','floating','shout','thought')):
+        return prediction
     speech=getattr(bubble,'detector_class',-1)==0
     texts=[(value or '').strip() for value in (bubble.text,bubble.translation)]
     joined=' '.join(texts)
@@ -337,6 +340,10 @@ def classify_bubble_type(image,bubble,gpu=False):
     cx=(x0+x1)/2-roi[0];cy=(y0+y1)/2-roi[1]
     edges=cv2.Canny(gray,45,130)
     closed_edges=cv2.morphologyEx(edges,cv2.MORPH_CLOSE,np.ones((3,3),np.uint8))
+    if roi[0]==0:closed_edges[:,0]=255
+    if roi[1]==0:closed_edges[0,:]=255
+    if roi[2]==image.width:closed_edges[:,-1]=255
+    if roi[3]==image.height:closed_edges[-1,:]=255
     contours,_=cv2.findContours(closed_edges,cv2.RETR_LIST,cv2.CHAIN_APPROX_SIMPLE)
     dark=cv2.threshold(gray,0,255,cv2.THRESH_BINARY_INV|cv2.THRESH_OTSU)[1]
     # Recover enclosed ink outlines split by Canny at sharp tips.
@@ -347,7 +354,11 @@ def classify_bubble_type(image,bubble,gpu=False):
     enclosing=[]
     for c in contours:
         x,y,w,h=cv2.boundingRect(c)
-        if x==0 or y==0 or x+w>=gray.shape[1] or y+h>=gray.shape[0]:continue
+        if ((x==0 and roi[0]>0) or (y==0 and roi[1]>0) or
+                (x+w>=gray.shape[1] and roi[2]<image.width) or
+                (y+h>=gray.shape[0] and roi[3]<image.height) or
+                (w>=gray.shape[1]-1 and h>=gray.shape[0]-1)):
+            continue
         if cv2.contourArea(c)>=max(80,.30*bw*bh) and cv2.pointPolygonTest(c,(cx,cy),False)>=0:
             enclosing.append(c)
     c=max(enclosing,key=cv2.contourArea) if enclosing else None
@@ -384,6 +395,24 @@ def classify_bubble_type(image,bubble,gpu=False):
         if abs(dx*(mx-cx)+dy*(my-cy))>.93*np.hypot(dx,dy)*np.hypot(mx-cx,my-cy):
             sectors.add(int((np.arctan2(my-cy,mx-cx)+np.pi)*8/np.pi)%16)
     heights=[r['box'][3]-r['box'][1] for r in bubble.lines if r.get('box') and r.get('engine')!='MTP']
+    if refresh:
+        # Detached radial ink strokes distinguish a thought halo from the
+        # connected zigzag outline of a shout, even if Canny joins their tips.
+        if len(sectors)>=8:
+            strokes,_=cv2.findContours((gray<128).astype(np.uint8),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+            ray_sectors=set()
+            for stroke in strokes:
+                (px,py),(w,h),angle=cv2.minAreaRect(stroke)
+                if not .65<radius[int(py),int(px)]<1.8 or max(w,h)<8 or max(w,h)<3*min(w,h):continue
+                theta=np.deg2rad(angle+(90 if h>w else 0))
+                dx,dy=px-cx,py-cy
+                if abs(dx*np.cos(theta)+dy*np.sin(theta))>.85*np.hypot(dx,dy):
+                    ray_sectors.add(int((np.arctan2(dy,dx)+np.pi)*8/np.pi)%16)
+            if len(ray_sectors)>=8:return 'thought'
+        if spikes:return 'shout'
+        if len(sectors)>=8 or (dot_count>=8 and len(dots)>=6):return 'thought'
+        if rect:return 'narration'
+        if prediction:return prediction
     if spikes or len(sectors)>=8 or (re.search(r'!!|!\?|\?!|！！|！？|？！',joined) and heights and
             np.median(heights)>=max(28,image.width*.045,bh*.35)):return 'shout'
     if rect:return 'narration'
@@ -483,97 +512,109 @@ class BubbleSegmenter:
         bw=max(8.0,float(bubble_box[2]-bubble_box[0]))
         bh=max(8.0,float(bubble_box[3]-bubble_box[1]))
         if bw>2400 or bh>2400:return None
-        pad=max(256,min(512,int(round(max(bw,bh)*.85)))) if use_nano else max(36,min(260,int(round(max(bw,bh)*.70))))
-        cbox=bounded_box(bubble_box,image.size,pad)
-        cw,ch=cbox[2]-cbox[0],cbox[3]-cbox[1]
-        if cw<24 or ch<24:return None
-        crop_rgb=np.asarray(image.crop(cbox).convert('RGB'))
-        imgsz=640
-        scale=min(float(imgsz)/ch,float(imgsz)/cw)
-        nw,nh=max(1,int(round(cw*scale))),max(1,int(round(ch*scale)))
-        resized=cv2.resize(crop_rgb,(nw,nh),interpolation=cv2.INTER_LINEAR)
-        canvas=np.full((imgsz,imgsz,3),114,dtype=np.uint8)
-        px=(imgsz-nw)//2;py=(imgsz-nh)//2
-        canvas[py:py+nh,px:px+nw]=resized
-        blob=(canvas.astype(np.float32)/255.0).transpose(2,0,1)[None,...]
-        try:
-            with self._lock:
-                if use_nano:
-                    import torch
-                    if self._nano_model is None:
-                        self._nano_device='cuda' if torch.cuda.is_available() else 'cpu'
-                        self._nano_model=torch.jit.load(str(nano_path),map_location=self._nano_device).eval()
-                    with torch.inference_mode():
-                        outputs=self._nano_model(torch.from_numpy(blob).to(self._nano_device))
-                        outs=[output.cpu().numpy() for output in outputs]
-                else:
-                    outs=self._session.run(None,{self._input_name:blob})
-        except Exception:
-            return None
-        out0=outs[0][0]
-        pred=out0.T if out0.shape[0]<out0.shape[1] else out0
-        proto=outs[1][0]
-        nm=proto.shape[0]
-        nc=pred.shape[1]-4-nm
-        if nc<1 or pred.shape[0]==0:return None
-        scores=pred[:,4:4+nc].max(axis=1)
-        keep=np.flatnonzero(scores>=0.28)
-        if not len(keep):return None
-        pred=pred[keep];scores=scores[keep]
-        cx_p,cy_p,w_p,h_p=pred[:,0],pred[:,1],pred[:,2],pred[:,3]
-        bx0,by0,bx1,by1=cx_p-w_p*.5,cy_p-h_p*.5,cx_p+w_p*.5,cy_p+h_p*.5
-        rx0=np.clip((bx0-px)/scale,0,cw);ry0=np.clip((by0-py)/scale,0,ch)
-        rx1=np.clip((bx1-px)/scale,0,cw);ry1=np.clip((by1-py)/scale,0,ch)
-        lx0,ly0=bubble_box[0]-cbox[0],bubble_box[1]-cbox[1]
-        lx1,ly1=bubble_box[2]-cbox[0],bubble_box[3]-cbox[1]
-        lcx,lcy=(lx0+lx1)*.5,(ly0+ly1)*.5
-        l_area=max(1.0,(lx1-lx0)*(ly1-ly0))
-        best_idx=-1;best_rank=-1.0
-        for i in range(len(scores)):
-            ca=max(1.0,float((rx1[i]-rx0[i])*(ry1[i]-ry0[i])))
-            if ca>cw*ch*.97 or ca<l_area*.30:continue
-            ix0=max(lx0,float(rx0[i]));iy0=max(ly0,float(ry0[i]))
-            ix1=min(lx1,float(rx1[i]));iy1=min(ly1,float(ry1[i]))
-            inter=max(0.0,ix1-ix0)*max(0.0,iy1-iy0)
-            ov=inter/max(1.0,min(ca,l_area))
-            has_center=(rx0[i]<=lcx<=rx1[i] and ry0[i]<=lcy<=ry1[i])
-            if ov<0.30 and not (has_center and ov>=0.15):continue
-            size_pen=1.0/(1.0+abs(np.log(max(0.2,ca/l_area)))*.35)
-            rank=float(scores[i])*(0.55+0.45*ov)*size_pen*(1.15 if has_center else 0.85)
-            if rank>best_rank:best_rank=rank;best_idx=i
-        if best_idx<0:return None
-        coeff=pred[best_idx,4+nc:4+nc+nm]
-        mh,mw=proto.shape[1],proto.shape[2]
-        logits=np.tensordot(coeff,proto,axes=([0],[0]))
-        sx=mw/float(imgsz);sy=mh/float(imgsz)
-        mx0=max(0,int(np.floor(bx0[best_idx]*sx))-1);my0=max(0,int(np.floor(by0[best_idx]*sy))-1)
-        mx1=min(mw,int(np.ceil(bx1[best_idx]*sx))+1);my1=min(mh,int(np.ceil(by1[best_idx]*sy))+1)
-        cropped_logits=np.full_like(logits,-10.0)
-        cropped_logits[my0:my1,mx0:mx1]=logits[my0:my1,mx0:mx1]
-        up_640=cv2.resize(cropped_logits,(imgsz,imgsz),interpolation=cv2.INTER_LINEAR)
-        sub=up_640[py:py+nh,px:px+nw]
-        prob_crop=cv2.resize(sub,(cw,ch),interpolation=cv2.INTER_LINEAR)
-        raw_mask=(prob_crop>0.0).astype(np.uint8)*255
-        raw_mask=cv2.GaussianBlur(raw_mask,(7,7),1.8)
-        raw_mask=(raw_mask>=128).astype(np.uint8)*255
-        contours,_=cv2.findContours(raw_mask,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:return None
-        filled=np.zeros((ch,cw),np.uint8)
-        main_c=max(contours,key=cv2.contourArea)
-        if cv2.contourArea(main_c)<l_area*.28:return None
-        cv2.drawContours(filled,[main_c],-1,255,cv2.FILLED)
-        # Remove thin protrusions before finding the centre, then inset along the contour.
-        distance=cv2.distanceTransform(filled,cv2.DIST_L2,5)
-        radius=int(np.clip(distance.max()*.28,2,28))
-        kernel=cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(2*radius+1,2*radius+1))
-        filled=cv2.bitwise_and(filled,cv2.morphologyEx(filled,cv2.MORPH_OPEN,kernel))
-        if not filled[int(np.clip(lcy,0,ch-1)),int(np.clip(lcx,0,cw-1))]:return None
-        if any(np.any(edge) for edge in (filled[0],filled[-1],filled[:,0],filled[:,-1])):return None
-        erode_r=max(3,int(margin),round(distance.max()*.07))
-        safe=cv2.erode(filled,cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(2*erode_r+1,2*erode_r+1)),
-                       borderType=cv2.BORDER_CONSTANT,borderValue=0)
-        if np.count_nonzero(safe)<l_area*.22:return None
-        return cbox,safe
+        base_pad=max(256,min(512,int(round(max(bw,bh)*.85)))) if use_nano else max(96,min(280,int(round(max(bw,bh)*.85))))
+        wide_pad=min(720,max(base_pad*2,int(round(max(bw,bh)*1.6)),min(image.width,560)))
+        pads=(base_pad,wide_pad) if wide_pad>base_pad else (base_pad,)
+
+        for attempt,pad in enumerate(pads):
+            cbox=bounded_box(bubble_box,image.size,pad)
+            cw,ch=cbox[2]-cbox[0],cbox[3]-cbox[1]
+            if cw<24 or ch<24:return None
+            crop_rgb=np.asarray(image.crop(cbox).convert('RGB'))
+            imgsz=640
+            scale=min(float(imgsz)/ch,float(imgsz)/cw)
+            nw,nh=max(1,int(round(cw*scale))),max(1,int(round(ch*scale)))
+            resized=cv2.resize(crop_rgb,(nw,nh),interpolation=cv2.INTER_LINEAR)
+            canvas=np.full((imgsz,imgsz,3),114,dtype=np.uint8)
+            px=(imgsz-nw)//2;py=(imgsz-nh)//2
+            canvas[py:py+nh,px:px+nw]=resized
+            blob=(canvas.astype(np.float32)/255.0).transpose(2,0,1)[None,...]
+            try:
+                with self._lock:
+                    if use_nano:
+                        import torch
+                        if self._nano_model is None:
+                            self._nano_device='cuda' if torch.cuda.is_available() else 'cpu'
+                            self._nano_model=torch.jit.load(str(nano_path),map_location=self._nano_device).eval()
+                        with torch.inference_mode():
+                            outputs=self._nano_model(torch.from_numpy(blob).to(self._nano_device))
+                            outs=[output.cpu().numpy() for output in outputs]
+                    else:
+                        outs=self._session.run(None,{self._input_name:blob})
+            except Exception:
+                return None
+            out0=outs[0][0]
+            pred=out0.T if out0.shape[0]<out0.shape[1] else out0
+            proto=outs[1][0]
+            nm=proto.shape[0]
+            nc=pred.shape[1]-4-nm
+            if nc<1 or pred.shape[0]==0:continue
+            scores=pred[:,4:4+nc].max(axis=1)
+            keep=np.flatnonzero(scores>=0.28)
+            if not len(keep):continue
+            pred=pred[keep];scores=scores[keep]
+            cx_p,cy_p,w_p,h_p=pred[:,0],pred[:,1],pred[:,2],pred[:,3]
+            bx0,by0,bx1,by1=cx_p-w_p*.5,cy_p-h_p*.5,cx_p+w_p*.5,cy_p+h_p*.5
+            rx0=np.clip((bx0-px)/scale,0,cw);ry0=np.clip((by0-py)/scale,0,ch)
+            rx1=np.clip((bx1-px)/scale,0,cw);ry1=np.clip((by1-py)/scale,0,ch)
+            lx0,ly0=bubble_box[0]-cbox[0],bubble_box[1]-cbox[1]
+            lx1,ly1=bubble_box[2]-cbox[0],bubble_box[3]-cbox[1]
+            lcx,lcy=(lx0+lx1)*.5,(ly0+ly1)*.5
+            l_area=max(1.0,(lx1-lx0)*(ly1-ly0))
+            best_idx=-1;best_rank=-1.0
+            for i in range(len(scores)):
+                ca=max(1.0,float((rx1[i]-rx0[i])*(ry1[i]-ry0[i])))
+                if ca>cw*ch*.97 or ca<l_area*.30:continue
+                ix0=max(lx0,float(rx0[i]));iy0=max(ly0,float(ry0[i]))
+                ix1=min(lx1,float(rx1[i]));iy1=min(ly1,float(ry1[i]))
+                inter=max(0.0,ix1-ix0)*max(0.0,iy1-iy0)
+                ov=inter/max(1.0,min(ca,l_area))
+                has_center=(rx0[i]<=lcx<=rx1[i] and ry0[i]<=lcy<=ry1[i])
+                if ov<0.30 and not (has_center and ov>=0.15):continue
+                size_pen=1.0/(1.0+abs(np.log(max(0.2,ca/l_area)))*.35)
+                rank=float(scores[i])*(0.55+0.45*ov)*size_pen*(1.15 if has_center else 0.85)
+                if rank>best_rank:best_rank=rank;best_idx=i
+            if best_idx<0:continue
+            coeff=pred[best_idx,4+nc:4+nc+nm]
+            mh,mw=proto.shape[1],proto.shape[2]
+            logits=np.tensordot(coeff,proto,axes=([0],[0]))
+            sx=mw/float(imgsz);sy=mh/float(imgsz)
+            mx0=max(0,int(np.floor(bx0[best_idx]*sx))-1);my0=max(0,int(np.floor(by0[best_idx]*sy))-1)
+            mx1=min(mw,int(np.ceil(bx1[best_idx]*sx))+1);my1=min(mh,int(np.ceil(by1[best_idx]*sy))+1)
+            cropped_logits=np.full_like(logits,-10.0)
+            cropped_logits[my0:my1,mx0:mx1]=logits[my0:my1,mx0:mx1]
+            up_640=cv2.resize(cropped_logits,(imgsz,imgsz),interpolation=cv2.INTER_LINEAR)
+            sub=up_640[py:py+nh,px:px+nw]
+            prob_crop=cv2.resize(sub,(cw,ch),interpolation=cv2.INTER_LINEAR)
+            raw_mask=(prob_crop>0.0).astype(np.uint8)*255
+            raw_mask=cv2.GaussianBlur(raw_mask,(7,7),1.8)
+            raw_mask=(raw_mask>=128).astype(np.uint8)*255
+            contours,_=cv2.findContours(raw_mask,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+            if not contours:continue
+            filled=np.zeros((ch,cw),np.uint8)
+            main_c=max(contours,key=cv2.contourArea)
+            if cv2.contourArea(main_c)<l_area*.28:continue
+            cv2.drawContours(filled,[main_c],-1,255,cv2.FILLED)
+            # Remove thin protrusions before finding the centre, then inset along the contour.
+            distance=cv2.distanceTransform(filled,cv2.DIST_L2,5)
+            radius=int(np.clip(distance.max()*.28,2,28))
+            kernel=cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(2*radius+1,2*radius+1))
+            filled=cv2.bitwise_and(filled,cv2.morphologyEx(filled,cv2.MORPH_OPEN,kernel))
+            if not filled[int(np.clip(lcy,0,ch-1)),int(np.clip(lcx,0,cw-1))]:continue
+            interior_clipped=(
+                (cbox[1]>0 and np.any(filled[0]))
+                or (cbox[3]<image.height and np.any(filled[-1]))
+                or (cbox[0]>0 and np.any(filled[:,0]))
+                or (cbox[2]<image.width and np.any(filled[:,-1]))
+            )
+            if interior_clipped:
+                continue
+            erode_r=max(3,int(margin),round(distance.max()*.07))
+            safe=cv2.erode(filled,cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(2*erode_r+1,2*erode_r+1)),
+                           borderType=cv2.BORDER_CONSTANT,borderValue=0)
+            if np.count_nonzero(safe)<l_area*.22:continue
+            return cbox,safe
+        return None
 
 
 BUBBLE_SEGMENTER=BubbleSegmenter()
@@ -1491,13 +1532,26 @@ def _mtp_enclosed_body(image,box):
         cv2.drawContours(body,[contour],-1,255,-1)
         if np.mean(light[body>0])<.72:continue
         return roi,cv2.erode(body,cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(13,13)))
+    for diameter in (15,31):
+        barrier=cv2.morphologyEx((gray<175).astype(np.uint8),cv2.MORPH_CLOSE,
+                                  cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(diameter,diameter)))
+        free=(barrier==0).astype(np.uint8)
+        seed=tuple(int(round(v)) for v in center)
+        if not free[seed[1],seed[0]]:continue
+        count,_,_,(x,y,w,h)=cv2.floodFill(free,None,seed,2)
+        if x<=0 or y<=0 or x+w>=gray.shape[1] or y+h>=gray.shape[0]:continue
+        if count<max(400,anchor_area) or count<.48*w*h:continue
+        body=(free==2).astype(np.uint8)*255
+        outline,_=cv2.findContours(body,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(body,outline,-1,255,cv2.FILLED)
+        return roi,cv2.erode(body,cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(13,13)))
     return None
 
 
 def _bubble_interior_region(image,bubble,page_bubbles=()):
     bx0,by0,bx1,by1=[int(round(v)) for v in bubble.box]
     bw=max(1,bx1-bx0);bh=max(1,by1-by0)
-    if bw<=16 and bh<=16:
+    if bw<=16 and bh<=16 and getattr(bubble,'engine','')!='MTP':
         raise ValueError('พื้นที่บับเบิ้ลเล็กเกินไปสำหรับข้อความ')
     if bw*bh>3_500_000:
         pad=12
@@ -1718,11 +1772,11 @@ def _thai_optical_dy(text,font_size,safe_mask,cx,cy,tile_w,tile_h):
 
 
 def layout_text(image,bubble,translation=None,font_choice=None,custom_size=None,custom_width=None,text_offset=None,custom_rotation=None,
-                *, original=None, cleaned=None, auto_stroke=False, auto_gradient=False, page_bubbles=()):
+                *, original=None, cleaned=None, auto_stroke=False, auto_gradient=False, page_bubbles=(), interior_region=None):
     from text_style_sampler import effects, sample_style
     previous = getattr(bubble, 'text_layer', None) or {}
     geometry = original if original is not None else image
-    layer = _position_text(geometry,bubble,translation,font_choice,custom_size,custom_width,text_offset,custom_rotation,page_bubbles)
+    layer = _position_text(geometry,bubble,translation,font_choice,custom_size,custom_width,text_offset,custom_rotation,page_bubbles,interior_region)
     if geometry is not image:
         layer['color'] = _sample_text_color(image,layer['box'])
     style = effects(previous)
@@ -1738,7 +1792,7 @@ def layout_text(image,bubble,translation=None,font_choice=None,custom_size=None,
     return layer
 
 
-def _position_text(image,bubble,translation=None,font_choice=None,custom_size=None,custom_width=None,text_offset=None,custom_rotation=None,page_bubbles=()):
+def _position_text(image,bubble,translation=None,font_choice=None,custom_size=None,custom_width=None,text_offset=None,custom_rotation=None,page_bubbles=(),interior_region=None):
     """Fit in the frame's own axes, then carry its rotation and user offset to preview and PSD."""
     chosen=normalize_font_choice(font_choice or getattr(bubble,'font_choice',None) or FONT_NAME)
     c_size=int(getattr(bubble,'custom_size',0) if custom_size is None else custom_size)
@@ -1747,7 +1801,7 @@ def _position_text(image,bubble,translation=None,font_choice=None,custom_size=No
     c_rot=_normalize_rotation(getattr(bubble,'custom_rotation',None) if custom_rotation is None else custom_rotation)
     q=[list(p) for p in getattr(bubble,'quad',[])]
     if not valid_quad(q) or abs(quad_angle(q))<.1:
-        layer=_layout_text(image,bubble,translation,font_choice=chosen,custom_size=c_size,custom_width=c_width,page_bubbles=page_bubbles)
+        layer=_layout_text(image,bubble,translation,font_choice=chosen,custom_size=c_size,custom_width=c_width,page_bubbles=page_bubbles,interior_region=interior_region)
         layer['bubble_quad']=q
         if offset:
             old_b=layer['box']
@@ -1768,7 +1822,7 @@ def _position_text(image,bubble,translation=None,font_choice=None,custom_size=No
     basis=np.array([[np.cos(r),-np.sin(r)],[np.sin(r),np.cos(r)]])
     mtp_shape=None
     if getattr(bubble,'engine','')=='MTP':
-        rbox,mask,found=_bubble_interior_region(image,bubble,page_bubbles)
+        rbox,mask,found=interior_region or _bubble_interior_region(image,bubble,page_bubbles)
         if found and np.any(mask):
             mtp_shape=(rbox,mask)
     points=np.asarray(q)
@@ -1877,7 +1931,7 @@ def _try_fit_boxes(render_text,boxes,info,low,high,safe_mask=None,safe_origin=(0
     return best
 
 
-def _layout_text(image,bubble,translation=None,box_options=None,font_choice=None,custom_size=0,custom_width=0,local_safe=None,local_origin=None,page_bubbles=()):
+def _layout_text(image,bubble,translation=None,box_options=None,font_choice=None,custom_size=0,custom_width=0,local_safe=None,local_origin=None,page_bubbles=(),interior_region=None):
     from windows_text import TextRenderer
     raw_text=(bubble.translation if translation is None else translation).strip().replace('\r\n','\n').replace('\r','\n')
     if not raw_text:raise ValueError('กรอบนี้ยังไม่มีคำแปลไทย')
@@ -1889,7 +1943,7 @@ def _layout_text(image,bubble,translation=None,box_options=None,font_choice=None
         boxes,found=box_options
         safe_mask=local_safe;safe_origin=local_origin or (0,0)
     else:
-        rbox,safe_mask,found=_bubble_interior_region(image,bubble,page_bubbles)
+        rbox,safe_mask,found=interior_region or _bubble_interior_region(image,bubble,page_bubbles)
         safe_origin=(rbox[0],rbox[1])
         boxes=[]
         for x0,y0,x1,y1 in centered_rectangle(safe_mask,alternatives=True):

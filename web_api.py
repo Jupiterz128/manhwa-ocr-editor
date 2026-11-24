@@ -35,8 +35,7 @@ from text_layout import (
     FONT_CHOICES,
     FONT_NAME,
     FRAME_TYPES,
-    FRAME_TYPE_LABELS,
-    extract_frame_tag,
+    _bubble_interior_region,
     classify_bubble_type,
     detect_and_parse_translations,
     export_source_script,
@@ -570,14 +569,29 @@ def apply_font_preset(key: str, d: dict):
         for p in targets:
             raw_im = core.load_image(p.path)
             work_im = compose_page(raw_im, p.clean_patches) if p.clean_patches else raw_im
-            for b in p.bubbles:
+            anchors = [copy.copy(item) for item in p.bubbles]
+            for anchor in anchors:
+                if anchor.engine == 'MTP' and len(anchor.lines)==1 and anchor.lines[0].get('engine')=='MTP':
+                    anchor.box = anchor.lines[0]['box']
+            for b,anchor in zip(p.bubbles,anchors):
                 total += 1
                 candidate = copy.copy(b)
-                ftype = candidate.frame_type
-                if ftype not in FRAME_TYPE_LABELS or extract_frame_tag(candidate.translation or '')[0]:
-                    ftype = classify_bubble_type(raw_im, candidate)
+                region = None
+                if candidate.engine == 'MTP':
+                    try:
+                        region = _bubble_interior_region(raw_im,anchor,anchors)
+                    except ValueError as exc:
+                        errors.append(f'{Path(p.path).name} · {b.id}: {exc}')
+                        continue
+                    roi,mask,found = region
+                    if found and np.any(mask):
+                        x,y,w,h = cv2.boundingRect(mask)
+                        candidate.box = [roi[0]+x,roi[1]+y,roi[0]+x+w,roi[1]+y+h]
+                ftype = classify_bubble_type(raw_im,candidate,refresh=True)
                 chosen_font = resolved_map.get(ftype, fallback_font)
                 candidate.frame_type = ftype
+                if not candidate.frame_type_locked:
+                    candidate.detected_frame_type = ftype
                 candidate.font_choice = chosen_font
                 candidate.custom_size = candidate.custom_width = 0
                 candidate.text_offset = []
@@ -587,7 +601,7 @@ def apply_font_preset(key: str, d: dict):
                     try:
                         previous = candidate.text_layer or {}
                         layer = layout_text(work_im, candidate, original=raw_im, cleaned=work_im,
-                                            page_bubbles=p.bubbles)
+                                            page_bubbles=anchors,interior_region=region)
                         layer['editor_box'] = _default_editor_box(candidate, layer, raw_im)
                         if previous.get('manual_effects') and 'color' in previous:
                             layer['color'] = previous['color']
@@ -1135,7 +1149,7 @@ def batch_action(key: str, action: str, d: dict):
             engine = d.get('engine', 'rapid')
             for k_sess in [k for k in mask_sessions if k[0] == key]:
                 mask_sessions.pop(k_sess, None)
-            pipe = reader(lang=lang, engine=engine, neural=True, type_scan=False)
+            pipe = reader(lang=lang, engine=engine, neural=True, type_scan=True)
             active_preset = project_font_preset(key)
             total = 0
             for p in pages:
