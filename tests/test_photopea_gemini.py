@@ -84,9 +84,11 @@ class GeminiSinglePassTranslatorTests(unittest.TestCase):
         }, ensure_ascii=False))
         mock_client.models.generate_content.return_value = mock_response
 
-        with patch('google.genai.Client', return_value=mock_client):
+        with patch('google.genai.Client', return_value=mock_client) as client_cls:
             report = gt.translate_pages_with_gemini([p1, p2], source_lang='ko+en', api_key='test-key', log=None)
 
+        self.assertEqual(client_cls.call_args.kwargs['api_key'], 'test-key')
+        self.assertEqual(client_cls.call_args.kwargs['http_options'].api_version, 'v1beta')
         self.assertEqual(mock_client.models.generate_content.call_count, 1)
         self.assertEqual(report['batches'], 1)
         self.assertEqual(report['translated_count'], 3)

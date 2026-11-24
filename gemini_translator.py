@@ -213,6 +213,7 @@ def translate_pages_with_gemini(
 
     try:
         from google import genai
+        from google.genai import types
     except ImportError as exc:
         raise RuntimeError(
             'ยังไม่ได้ติดตั้ง google-genai ใน .venv กรุณารัน: '
@@ -220,7 +221,10 @@ def translate_pages_with_gemini(
         ) from exc
 
     key = resolve_api_key(api_key)
-    client = genai.Client(api_key=key)
+    client = genai.Client(
+        api_key=key,
+        http_options=types.HttpOptions(api_version='v1beta'),
+    )
 
     changes = {}
     batch_size = max(1, int(max_batch_size or 200))
