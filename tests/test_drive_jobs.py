@@ -52,3 +52,39 @@ class DriveJobs(unittest.TestCase):
             with patch.object(sys,'argv',args+['--translation-link','back']):
                 self.assertEqual(cli.run(cli.options()),0)
             self.assertEqual(calls,['scan','.txt','.txt','clean','.psd','.psd'])
+
+    def test_drive_uploads_selected_outputs(self):
+        import json
+
+        def images(source_id, dest):
+            dest.mkdir()
+            for name in ('01.png','02.png'):
+                Image.new('RGB',(40,40),'white').save(dest/name)
+            return 'ตอน 01',list(dest.iterdir())
+
+        for fmt in ('mtp','all','psd+mtp'):
+            with self.subTest(fmt=fmt), tempfile.TemporaryDirectory() as root, ExitStack() as stack:
+                uploads=[]
+                def upload(path,folder):
+                    self.assertTrue(path.is_file())
+                    if folder=='outputs':
+                        uploads.append(path.name)
+                        if path.suffix=='.mtp':
+                            data=json.loads(path.read_text('utf-8'))
+                            self.assertEqual(len(data['files']),2)
+                stack.enter_context(patch.object(drive,'ROOT',Path(root)))
+                stack.enter_context(patch.object(drive,'download_drive_folder_images',side_effect=images))
+                stack.enter_context(patch.object(drive,'create_job_subfolder',side_effect=['text','outputs']))
+                stack.enter_context(patch.object(drive,'upload_file_to_folder',side_effect=upload))
+                stack.enter_context(patch.object(cli.app,'LocalPipeline')).return_value.scan.return_value=[]
+                session=stack.enter_context(patch.object(cli,'PhotopeaSession'))
+                psd=stack.enter_context(patch.object(cli,'export_psd',side_effect=lambda im,page,path:(path.touch() or {})))
+                argv=['cli','--drive-link','src','--input-mode','image_folder','--psd-backend','photopea','--export-format',fmt]
+                with patch.object(sys,'argv',argv):
+                    self.assertEqual(cli.run(cli.options()),0)
+                if fmt=='mtp':
+                    session.assert_not_called()
+                    psd.assert_not_called()
+                    self.assertEqual(uploads,['ตอน 01.mtp'])
+                else:
+                    self.assertEqual(uploads,['01.psd','02.psd','ตอน 01.mtp'])

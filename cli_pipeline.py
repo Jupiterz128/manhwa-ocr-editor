@@ -40,7 +40,7 @@ def options():
     p.add_argument('--stitch-height', type=int, default=15000)
     p.add_argument('--stitch-width', type=int, default=720)
     p.add_argument('--skip-clean', type=boolean, default=False)
-    p.add_argument('--export-format', choices=['psd','mtp','png','all'], default='psd')
+    p.add_argument('--export-format', choices=['psd','mtp','png','psd+mtp','all'], default='psd')
     p.add_argument('--psd-backend', choices=['photoshop','photopea'],
                    default=os.environ.get('MANHWA_PSD_BACKEND', DEFAULT_PSD_BACKEND))
     p.add_argument('--auto-translate-gemini', '--auto-translate', dest='auto_translate_gemini',
@@ -89,7 +89,6 @@ def run(args):
         job=Path(mkdtemp(prefix=source_id+'-',dir=jobs))
         cache=drive.ROOT/'runner_cache'/source_id
         args.output_dir=job/'output'
-        args.export_format='psd'
         if args.input_mode=='mtp':
             args.input,name=drive.download_drive_file(source_id,job/'input')
             if args.input.suffix.lower()!='.mtp':raise ValueError('Expected .mtp input')
@@ -258,8 +257,11 @@ def run(args):
             checkpoint(cache/'project_cleaned.json',pages,drafts,args.preset,drive_folder_name=episode)
             (cache/'pending').unlink()
         psd_backend = getattr(args, 'psd_backend', DEFAULT_PSD_BACKEND)
+        files_to_upload = []
+        write_psd = args.export_format in ('psd','psd+mtp','all')
+        write_png = args.export_format=='png' or (not args.drive_link and args.export_format=='all')
         use_pp_session = (
-            args.export_format in ('psd','all')
+            write_psd
             and psd_backend=='photopea'
             and export_psd is _real_export_psd
         )
@@ -268,26 +270,31 @@ def run(args):
             if pp_session is not None:
                 pp_session.start()
             for i,page in enumerate(pages,1):
+                if not (write_png or write_psd):break
                 image=app.load_image(page.path)
-                if args.export_format in ('png','all'):
+                if write_png:
                     composite_text_crop(compose_page(image,page.clean_patches),page.bubbles,(0,0)).save(output/f'{i:02}.png')
-                if args.export_format in ('psd','all'):
+                    files_to_upload.append(output/f'{i:02}.png')
+                if write_psd:
                     if export_psd is _real_export_psd:
                         report=export_psd(image,page,output/f'{i:02}.psd',
                                           backend=psd_backend,session=pp_session)
                     else:
                         report=export_psd(image,page,output/f'{i:02}.psd')
+                    files_to_upload.append(output/f'{i:02}.psd')
                     for warning in report.get('warnings',[]):print(warning,flush=True)
                 print(f'Export pages {100*i/len(pages):.0f}%',flush=True)
         finally:
             if pp_session is not None:
                 pp_session.close()
+        if args.export_format in ('mtp','psd+mtp','all'):
+            mtp_path=output/(drive.local_name(episode)+'.mtp' if args.drive_link else 'project.mtp')
+            app.write_mtp(mtp_path,pages,fonts,cancel,emit)
+            files_to_upload.append(mtp_path)
         if args.drive_link and not stats['failures']:
             dest=drive.create_job_subfolder(drive.PSD_OUTPUT_FOLDER_ID,episode)
-            for i in range(1,len(pages)+1):
-                drive.upload_file_to_folder(output/f'{i:02}.psd',dest)
-        if args.export_format in ('mtp','all'):
-            app.write_mtp(output/'project.mtp',pages,fonts,cancel,emit)
+            for path in files_to_upload:
+                drive.upload_file_to_folder(path,dest)
     finally:
         checkpoint(output/'project.json',pages,drafts,args.preset)
         app.atomic_json(output/'clean_report.json',stats)
