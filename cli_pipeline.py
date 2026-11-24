@@ -11,9 +11,12 @@ from PIL import Image
 import manhwa_ocr as app
 from bubble_cleaner import Cleaner, compose_page, encode_patch, encode_region, prepare_region
 from clean_quality import clean_checked
-from photoshop_export import export_psd
+from gemini_translator import DEFAULT_GEMINI_MODEL, translate_pages_with_gemini
+from photoshop_export import DEFAULT_PSD_BACKEND, PhotopeaSession, export_psd as _real_export_psd
 from text_layout import (classify_bubble_type, composite_text_crop, detect_and_parse_translations,
-                         layout_text, load_font_presets, resolve_font)
+                         export_source_script, layout_text, load_font_presets, resolve_font)
+
+export_psd = _real_export_psd
 
 
 def boolean(value):
@@ -38,7 +41,11 @@ def options():
     p.add_argument('--stitch-width', type=int, default=720)
     p.add_argument('--skip-clean', type=boolean, default=False)
     p.add_argument('--export-format', choices=['psd','mtp','png','all'], default='psd')
-    p.add_argument('--psd-backend', choices=['photoshop','photopea'], default='photoshop')
+    p.add_argument('--psd-backend', choices=['photoshop','photopea'],
+                   default=os.environ.get('MANHWA_PSD_BACKEND', DEFAULT_PSD_BACKEND))
+    p.add_argument('--auto-translate-gemini', '--auto-translate', dest='auto_translate_gemini',
+                   nargs='?', const=True, default=False, type=boolean)
+    p.add_argument('--gemini-model', default=None)
     args=p.parse_args()
     if bool(args.drive_link)!=bool(args.input_mode):
         p.error('--drive-link and --input-mode must be used together')
@@ -91,7 +98,9 @@ def run(args):
         elif drive_first:
             args.input=job/'images'
             episode,_=drive.download_drive_folder_images(source_id,args.input)
-            args.smart_stitch=args.skip_clean=False
+            args.skip_clean=False
+            if not args.auto_translate_gemini:
+                args.smart_stitch=False
         else:
             args.input=cache/'project_cleaned.json'
             if not args.input.is_file() or (cache/'pending').exists():
@@ -149,8 +158,25 @@ def run(args):
             else:
                 raise ValueError('Unsupported project format')
         if not pages:raise ValueError('No pages in input')
+        if args.auto_translate_gemini and not args.translation:
+            tr_report = translate_pages_with_gemini(
+                pages,
+                source_lang=args.lang,
+                model=args.gemini_model or DEFAULT_GEMINI_MODEL,
+                log=print,
+            )
+            stats['translation'] = {
+                'provider': 'google-genai',
+                'model': tr_report['model'],
+                'translated': tr_report['translated_count'],
+                'candidates': tr_report['total_candidates'],
+                'batches': tr_report['batches'],
+            }
+            if tr_report['translated_count']:
+                (output/'translation_gemini.txt').write_text(
+                    export_source_script(pages,'id_template'),encoding='utf-8'
+                )
         if drive_first:
-            from text_layout import export_source_script
             cache.mkdir(parents=True,exist_ok=True)
             (cache/'pending').write_text(job.name,encoding='utf-8')
             text_folder=drive.create_job_subfolder(drive.TEXT_EXPORT_FOLDER_ID,episode)
@@ -158,7 +184,10 @@ def run(args):
                 script=job/(drive.local_name(episode)+suffix)
                 script.write_text(export_source_script(pages,mode),encoding='utf-8')
                 drive.upload_file_to_folder(script,text_folder)
-            print('ส่งต้นฉบับพร้อมแปลแล้ว กำลังสร้าง Mask และ Clean ต่อ',flush=True)
+            if args.auto_translate_gemini:
+                print('แปลภาษาไทยด้วย Gemini และส่งสคริปต์แล้ว กำลังสร้าง Mask, Clean และส่งออก PSD ต่อในรอบเดียว',flush=True)
+            else:
+                print('ส่งต้นฉบับพร้อมแปลแล้ว กำลังสร้าง Mask และ Clean ต่อ',flush=True)
             for page in pages:
                 raw=app.load_image(page.path)
                 for b in page.bubbles:
@@ -226,14 +255,31 @@ def run(args):
         if drive_first and not stats['failures']:
             checkpoint(cache/'project_cleaned.json',pages,drafts,args.preset,drive_folder_name=episode)
             (cache/'pending').unlink()
-        for i,page in enumerate(pages,1):
-            image=app.load_image(page.path)
-            if args.export_format in ('png','all'):
-                composite_text_crop(compose_page(image,page.clean_patches),page.bubbles,(0,0)).save(output/f'{i:02}.png')
-            if args.export_format in ('psd','all'):
-            report=export_psd(image,page,output/f'{i:02}.psd',backend=args.psd_backend)
-                for warning in report.get('warnings',[]):print(warning,flush=True)
-            print(f'Export pages {100*i/len(pages):.0f}%',flush=True)
+        psd_backend = getattr(args, 'psd_backend', DEFAULT_PSD_BACKEND)
+        use_pp_session = (
+            args.export_format in ('psd','all')
+            and psd_backend=='photopea'
+            and export_psd is _real_export_psd
+        )
+        pp_session = PhotopeaSession() if use_pp_session else None
+        try:
+            if pp_session is not None:
+                pp_session.start()
+            for i,page in enumerate(pages,1):
+                image=app.load_image(page.path)
+                if args.export_format in ('png','all'):
+                    composite_text_crop(compose_page(image,page.clean_patches),page.bubbles,(0,0)).save(output/f'{i:02}.png')
+                if args.export_format in ('psd','all'):
+                    if export_psd is _real_export_psd:
+                        report=export_psd(image,page,output/f'{i:02}.psd',
+                                          backend=psd_backend,session=pp_session)
+                    else:
+                        report=export_psd(image,page,output/f'{i:02}.psd')
+                    for warning in report.get('warnings',[]):print(warning,flush=True)
+                print(f'Export pages {100*i/len(pages):.0f}%',flush=True)
+        finally:
+            if pp_session is not None:
+                pp_session.close()
         if args.drive_link and not stats['failures']:
             dest=drive.create_job_subfolder(drive.PSD_OUTPUT_FOLDER_ID,episode)
             for i in range(1,len(pages)+1):
