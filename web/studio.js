@@ -40,10 +40,12 @@ async function api(path,data){
 }
 function modal(title){$('modal').replaceChildren(el('h2',title));if(!$('dialog').open)$('dialog').showModal();return $('modal')}
 $('close').onclick=()=>$('dialog').close();
-let pending=null, timer, chain=Promise.resolve();
+let pending=null, timer, chain=Promise.resolve(), editSeq=0, sliderDragging=false;
 function queueEdit(values){
  if(!bubble())return;
- if(!pending)pending={key,n,id,data:{}};
+ editSeq++;
+ if(!pending)pending={key,n,id,data:{},seq:editSeq};
+ pending.seq=editSeq;
  Object.assign(pending.data,values);clearTimeout(timer);timer=setTimeout(()=>run(flush),320)
 }
 async function flush(){
@@ -52,7 +54,9 @@ async function flush(){
   const p=pending;pending=null;
   chain=chain.catch(()=>{}).then(async()=>{
    const res=await api(p.key+'/page/'+p.n+'/edit',{...p.data,id:p.id});
-   if(key===p.key && !pending){pages[p.n]=res.page;if(n===p.n){sidebar();draw()}}
+   if(key===p.key && !pending && !drag && !sliderDragging && p.seq===editSeq){
+    pages[p.n]=res.page;if(n===p.n){sidebar();draw()}
+   }
   })
  }
  await chain
@@ -80,7 +84,14 @@ function renderPresets(){
   localStorage.setItem('studio-preset',selectedPreset);
  }
 }
-$('presetSelect').onchange=()=>{selectedPreset=$('presetSelect').value;localStorage.setItem('studio-preset',selectedPreset)};
+$('presetSelect').onchange=()=>run(async()=>{
+ selectedPreset=$('presetSelect').value;
+ localStorage.setItem('studio-preset',selectedPreset);
+ if(key){
+  const res=await api(key+'/font-preset',{preset:selectedPreset});
+  if(res?.note)info(res.note)
+ }
+});
 function isTextTransform(b){
  return !maskEdit && view==='thai' && !!(b&&b.translation&&b.translation.trim())
 }
@@ -88,6 +99,7 @@ async function project(k,title){
  await flush();
  if(maskEdit)await cancelMaskEdit(true);
  let st=await api(k+'/state');key=k;localStorage.setItem('studio-project',k);pages=st.pages;fonts=st.fonts;jsonPath=st.json_path||'';
+ if(st.font_preset){selectedPreset=st.font_preset;localStorage.setItem('studio-preset',selectedPreset);renderPresets()}
  $('projectName').textContent=title;n=0;id=page()?.bubbles[0]?.id||'';drawFrame=false;maskEdit=false;fit();refresh()
 }
 async function projectList(){
@@ -281,6 +293,20 @@ function family(font){
  }
  return loadedFonts.get(font)
 }
+function applyLiveBubbleStyle(){
+ const b=bubble();if(!b)return;
+ const node=$('overlay')?.querySelector('.bubble.selected');
+ if(!node){draw();return}
+ const l=b.text_layer||{}, textMode=isTextTransform(b);
+ const rect=textMode?bounds(b):b.box,[x,y,r,bt]=rect;
+ Object.assign(node.style,{
+  left:x*zoom+'px',top:y*zoom+'px',width:Math.max(2,(r-x)*zoom)+'px',height:Math.max(2,(bt-y)*zoom)+'px',
+  fontSize:(l.font_size||24)*zoom+'px',transform:'rotate('+(textMode?l.rotation||0:0)+'deg)'
+ });
+ const sp=node.querySelector('span');
+ if(sp&&textMode&&!l.hidden)sp.textContent=l.text||b.translation;
+ updateCoordInfo()
+}
 function updateCoordInfo(){
  let node=$('coordInfo'),b=bubble();if(!node||!b)return;
  let l=b.text_layer||{}, textMode=isTextTransform(b);
@@ -350,11 +376,28 @@ function inspect(){
  $('stroke').checked=!!s.enabled;$('edge').value=rgb(s.color);$('width').value=s.size||3;$('gradient').checked=!!g.enabled;$('start').value=rgb(g.start_color||[255,255,255]);$('end').value=rgb(g.end_color||[200,200,200]);$('angle').value=g.angle??90;
  $('thai').oninput=()=>{b.translation=$('thai').value;l.text=b.translation;queueEdit({translation:b.translation});sidebar();draw()};
  $('source').oninput=()=>{b.text=$('source').value;queueEdit({text:b.text});sidebar()};
- $('font').onchange=()=>{b.font_choice=$('font').value;queueEdit({font_choice:b.font_choice});draw()};
- $('frame').onchange=()=>{b.frame_type=$('frame').value;$('frameBadge').textContent=FRAME_SHORT[b.frame_type]||b.frame_type;queueEdit({frame_type:b.frame_type})};
+ $('font').onchange=()=>{b.font_choice=$('font').value;if(b.text_layer)b.text_layer.font_choice=b.font_choice;queueEdit({font_choice:b.font_choice});run(flush);draw()};
+ $('frame').onchange=()=>run(async()=>{
+  const ft=$('frame').value, activeP=$('presetSelect')?.value||selectedPreset;
+  b.frame_type=ft;$('frameBadge').textContent=FRAME_SHORT[ft]||ft;
+  const mapped=fontPresets[activeP]?.[ft];
+  if(mapped&&fonts.includes(mapped)){
+   b.font_choice=mapped;if(b.text_layer)b.text_layer.font_choice=mapped;
+   if($('font'))$('font').value=mapped
+  }
+  draw();
+  queueEdit({frame_type:ft,font_preset:activeP});
+  await flush();
+  inspect();draw()
+ });
  function edit(k,v){l[k]=v;queueEdit({[k]:v});draw()}
- $('align').onchange=()=>edit('alignment',$('align').value);$('ink').oninput=()=>edit('color',triplet($('ink').value));$('rotation').onchange=()=>edit('rotation',+$('rotation').value);
- $('size').oninput=()=>{let v=+$('size').value;$('sizeValue').value=v;edit('font_size',v)};
+ $('align').onchange=()=>edit('alignment',$('align').value);$('ink').oninput=()=>edit('color',triplet($('ink').value));
+ $('rotation').onchange=()=>{let before=captureTransform(bubble()),v=+$('rotation').value;layer().rotation=v;pushTransformHistory(before,captureTransform(bubble()),'การหมุนข้อความ');queueEdit({box:bounds(bubble()),rotation:v});run(flush);applyLiveBubbleStyle()};
+ let sizeBefore=null;
+ $('size').onpointerdown=()=>{sliderDragging=true;sizeBefore=captureTransform(bubble())};
+ $('size').oninput=()=>{let v=+$('size').value;$('sizeValue').value=v;layer().font_size=v;applyLiveBubbleStyle()};
+ $('size').onchange=()=>{sliderDragging=false;let v=+$('size').value;$('sizeValue').value=v;layer().font_size=v;if(sizeBefore){pushTransformHistory(sizeBefore,captureTransform(bubble()),'การปรับขนาดฟอนต์');sizeBefore=null}queueEdit({box:bounds(bubble()),font_size:v});run(flush);applyLiveBubbleStyle()};
+ $('size').onpointerup=$('size').onpointercancel=()=>{sliderDragging=false};
  for(const k of ['stroke','edge','width','gradient','start','end','angle'])$(k).oninput=()=>{
   let style={stroke:{enabled:$('stroke').checked,color:triplet($('edge').value),size:Math.max(1,Math.min(8,+$('width').value))},gradient:{enabled:$('gradient').checked,start_color:triplet($('start').value),end_color:triplet($('end').value),angle:+$('angle').value}};
   Object.assign(l,style);queueEdit({style});draw()
@@ -435,9 +478,10 @@ async function undoMaskEdit(){
 function reflow(b,w,h){
  const l=b.text_layer,ctx=document.createElement('canvas').getContext('2d');
  ctx.font=l.font_size+'px '+family(b.font_choice);
+ const src=(l.text||b.translation).replace(/\r\n/g,'\n');
  const segment=new Intl.Segmenter('th',{granularity:'word'});
  function lines(max){
-  let out=[];for(let para of b.translation.split('\n')){let line='';for(let {segment:word} of segment.segment(para)){
+  let out=[];for(let para of src.split('\n')){let line='';for(let {segment:word} of segment.segment(para)){
    if(line && ctx.measureText(line+word).width>max){out.push(line.trimEnd());line=''}line+=word
   }out.push(line.trimEnd())}return out
  }
@@ -503,9 +547,10 @@ $('viewport').onpointermove=e=>{
   if(rot===-180)rot=180;
   layer().rotation=rot;
   if($('rotation'))$('rotation').value=rot;
-  draw();return
+  applyLiveBubbleStyle();return
  }
  const dx=p[0]-drag.p[0],dy=p[1]-drag.p[1],k=drag.handle;
+ const W=page().width,H=page().height;
  let [x,y,r,bt]=drag.rect;
  if(drag.kind==='moveBox'){
   if(!k){x+=dx;r+=dx;y+=dy;bt+=dy}else{
@@ -514,27 +559,48 @@ $('viewport').onpointermove=e=>{
    if(k.includes('n'))y=Math.min(bt-10,y+dy);
    if(k.includes('s'))bt=Math.max(y+10,bt+dy);
   }
-  const W=page().width,H=page().height,bw=r-x,bh=bt-y;
+  const bw=r-x,bh=bt-y;
   if(!k){x=Math.max(0,Math.min(W-bw,x));y=Math.max(0,Math.min(H-bh,y));r=x+bw;bt=y+bh}
   else{x=Math.max(0,x);y=Math.max(0,y);r=Math.min(W,r);bt=Math.min(H,bt)}
   bubble().box=[Math.round(x),Math.round(y),Math.round(r),Math.round(bt)];
-  draw();return
+  applyLiveBubbleStyle();return
  }
- if(!k){x+=dx;r+=dx;y+=dy;bt+=dy}else{
-  const theta=(layer().rotation||0)*Math.PI/180,c=Math.cos(theta),s=Math.sin(theta);
+ if(!k){
+  const bw=r-x,bh=bt-y;
+  x=Math.max(0,Math.min(W-bw,x+dx));y=Math.max(0,Math.min(H-bh,y+dy));
+  r=x+bw;bt=y+bh
+ }else{
+  const rotDeg=layer().rotation||0,theta=rotDeg*Math.PI/180,c=Math.cos(theta),s=Math.sin(theta);
   const hx=k.includes('w')?-1:k.includes('e')?1:0,hy=k.includes('n')?-1:k.includes('s')?1:0;
   const w=r-x,h=bt-y,lx=dx*c+dy*s,ly=-dx*s+dy*c;
-  let nw=Math.max(10,w+lx*hx),nh=Math.max(10,h+ly*hy);
+  let nw=hx?Math.max(20,w+lx*hx):w, nh=hy?Math.max(20,h+ly*hy):h;
+  if(Math.abs(rotDeg)<1e-6){
+   // Clamp dragged edge to page bounds while keeping the opposite corner strictly pinned!
+   if(hx===1)nw=Math.min(nw,W-x);
+   if(hx===-1)nw=Math.min(nw,r);
+   if(hy===1)nh=Math.min(nh,H-y);
+   if(hy===-1)nh=Math.min(nh,bt);
+  }
   if(k.length===2){
-   const factor=Math.max(6/drag.size,Math.min(220/drag.size,(nw*w+nh*h)/(w*w+h*h)));
-   nw=w*factor;nh=h*factor;layer().font_size=Math.round(drag.size*factor);
+   let maxF=220/drag.size;
+   if(Math.abs(rotDeg)<1e-6){
+    if(hx===1)maxF=Math.min(maxF,(W-x)/w);
+    if(hx===-1)maxF=Math.min(maxF,r/w);
+    if(hy===1)maxF=Math.min(maxF,(H-y)/h);
+    if(hy===-1)maxF=Math.min(maxF,bt/h);
+   }
+   const minF=Math.max(6/drag.size,20/w,20/h);
+   const rawF=(nw*w+nh*h)/(w*w+h*h);
+   const factor=Math.max(minF,Math.min(maxF,rawF));
+   nw=w*factor;nh=h*factor;
+   layer().font_size=Math.max(6,Math.min(220,Math.round(drag.size*factor)));
    $('size').value=$('sizeValue').value=layer().font_size
   }
   const shiftX=(nw-w)*hx/2,shiftY=(nh-h)*hy/2;
   const cx=(x+r)/2+shiftX*c-shiftY*s,cy=(y+bt)/2+shiftX*s+shiftY*c;
   x=cx-nw/2;r=cx+nw/2;y=cy-nh/2;bt=cy+nh/2
  }
- let rect=[x,y,r,bt];layer().editor_box=rect;if(k.length===1)layer().text=reflow(bubble(),r-x,bt-y);draw()
+ let rect=[x,y,r,bt];layer().editor_box=rect;if(k.length===1)layer().text=reflow(bubble(),r-x,bt-y);applyLiveBubbleStyle()
 };
 $('viewport').onpointerup=e=>{
  if(!drag)return;let d=drag;drag=null;
@@ -569,7 +635,9 @@ $('viewport').onpointerup=e=>{
  }
  if(d.kind==='moveText'){
   pushTransformHistory(d.before,captureTransform(bubble()),d.handle?'การปรับขนาด':'การปรับตำแหน่ง');
-  queueEdit({box:bounds(bubble()),font_size:layer().font_size,wrapped:layer().text});run(flush)
+  const payload={box:bounds(bubble()),font_size:layer().font_size};
+  if(d.handle&&d.handle.length===1&&layer().text)payload.wrapped=layer().text;
+  queueEdit(payload);run(flush)
  }
 };
 $('viewport').onpointercancel=()=>{drag=null;$('paint').width=1;run(async()=>{if(key){pages=(await api(key+'/state')).pages;refresh()}})};
@@ -615,6 +683,7 @@ async function openPresetEditor(isNew=false){
    const mapping={};for(const [k,s] of Object.entries(selects))mapping[k]=s.value;
    const res=await api('font-presets',{name,mapping});
    fontPresets=res.presets;selectedPreset=res.name;renderPresets();
+   if(key)await api(key+'/font-preset',{preset:selectedPreset});
    info(res.note);$('dialog').close()
   }catch(err){status.className='err-note';status.textContent=err.message}
   finally{saveBtn.disabled=false}

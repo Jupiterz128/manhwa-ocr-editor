@@ -341,21 +341,75 @@ class StudioPersistenceTests(unittest.TestCase):
             self.assertFalse(opened['cancelled'])
             self.assertIn('สวัสดีจากไฟล์', opened['text'])
 
-            # Font presets list, create new profile, apply profile
+            # Font presets list, create new profile, apply profile, frame_type -> font sync, & persistence across pages/JSON/MTP
             listed = studio.get_font_presets()
             self.assertIn('1. มังฮวาเกาหลี', listed['presets'])
             self.assertEqual(len(listed['frame_types']), 9)
-            created = studio.update_font_presets({
-                'name': '3. ทดสอบโปรไฟล์',
-                'mapping': {ft['key']: 'TH Sarabun New Bold' for ft in listed['frame_types']},
-            })
+            custom_map = {ft['key']: 'TH Sarabun New Bold' for ft in listed['frame_types']}
+            def _installed(fname):
+                try:
+                    tl.resolve_font(fname)
+                    return True
+                except Exception:
+                    return False
+            alt_font = next((f for f in listed['fonts'] if f != 'TH Sarabun New Bold' and _installed(f)), 'TH Sarabun New Bold')
+            custom_map['shout'] = alt_font
+            created = studio.update_font_presets({'name': '3. ทดสอบโปรไฟล์', 'mapping': custom_map})
             self.assertIn('3. ทดสอบโปรไฟล์', created['presets'])
+
+            # Set active project preset -> verify state remembers it
+            studio.set_project_font_preset('pjob', {'preset': '3. ทดสอบโปรไฟล์'})
+            self.assertEqual(studio.state('pjob')['font_preset'], '3. ทดสอบโปรไฟล์')
+
+            # Changing frame_type to 'shout' immediately locks frame_type and switches font to active profile's shout font
+            studio.action('pjob', 0, 'edit', {'id': b.id, 'frame_type': 'shout'})
+            pages_ft, _ = studio.load('pjob')
+            b_ft = pages_ft[0].bubbles[0]
+            self.assertTrue(b_ft.frame_type_locked)
+            self.assertEqual(b_ft.frame_type, 'shout')
+            self.assertEqual(b_ft.font_choice, alt_font)
+            self.assertEqual(b_ft.text_layer['font'], tl.resolve_font(alt_font).postscript)
+
+            # Save JSON & reload -> active font_preset persists
+            jpath = root / 'preset_proj.json'
+            studio.save_json_project('pjob', {'path': str(jpath)})
+            opened_j = studio.open_json_project({'path': str(jpath)})
+            self.assertEqual(opened_j['font_preset'], '3. ทดสอบโปรไฟล์')
+            self.assertEqual(studio.state(opened_j['key'])['font_preset'], '3. ทดสอบโปรไฟล์')
+
             applied = studio.apply_font_preset('pjob', {'preset': '3. ทดสอบโปรไฟล์', 'all_pages': True})
             self.assertEqual(applied['laid_out'], 1)
             self.assertIn('3. ทดสอบโปรไฟล์', applied['note'])
             pages, _ = studio.load('pjob')
-            self.assertEqual(pages[0].bubbles[0].font_choice, 'TH Sarabun New Bold')
+            self.assertEqual(pages[0].bubbles[0].font_choice, alt_font)
             self.assertTrue(pages[0].bubbles[0].text_layer['auto_leading'])
+
+    def test_resize_punctuation_adapted_text_never_snaps_back(self):
+        im, b = fixtures.styled_fixture()
+        b.translation = 'เดี๋ยวก่อน… อย่าเพิ่งไป!'
+        with tempfile.TemporaryDirectory() as tmp, patch.object(studio, 'ROOT', Path(tmp)):
+            source = Path(tmp) / '01.png'
+            im.save(source)
+            studio.save('punct', '01.png', [Page(str(source), [b])], {})
+            # Initial layout adapts Unicode ellipsis '…' -> '...'
+            studio.action('punct', 0, 'edit', {'id': b.id, 'translation': b.translation})
+            pages0, _ = studio.load('punct')
+            adapted = pages0[0].bubbles[0].text_layer['text']
+            # Resize box & font size directly with adapted wrapped text -> must NOT fail or shrink back
+            target_box = [95.0, 82.0, 515.0, 292.0]
+            studio.action('punct', 0, 'edit', {
+                'id': b.id, 'box': target_box, 'font_size': 64, 'wrapped': adapted,
+            })
+            pages1, _ = studio.load('punct')
+            tl1 = pages1[0].bubbles[0].text_layer
+            self.assertEqual(tl1['font_size'], 64.0)
+            self.assertEqual(tl1['editor_box'], target_box)
+            # Slider font size change alone keeps exact editor_box & font_size without auto-fit shrinking
+            studio.action('punct', 0, 'edit', {'id': b.id, 'box': target_box, 'font_size': 88})
+            pages2, _ = studio.load('punct')
+            tl2 = pages2[0].bubbles[0].text_layer
+            self.assertEqual(tl2['font_size'], 88.0)
+            self.assertEqual(tl2['editor_box'], target_box)
 
     @unittest.skipUnless(os.environ.get('TEST_STUDIO_BROWSER') == '1', 'opt-in browser and Photopea integration')
     def test_browser_transform_and_export_at_desktop_scaling(self):
@@ -371,12 +425,15 @@ class StudioPersistenceTests(unittest.TestCase):
         font = ImageFont.truetype(fpath, 36) if Path(fpath).is_file() else ImageFont.load_default()
         dr.text((90, 342), 'HELLO', font=font, fill='black')
         b_untr = Bubble(box=[340, 310, 520, 420], text='WAIT', translation='', score=0.96, lines=[])
+        b_p2 = Bubble(box=[80, 70, 420, 240], text='NEXT PAGE', translation='หน้าถัดไป', score=0.98, lines=[])
         with tempfile.TemporaryDirectory() as tmp, patch.object(studio, 'ROOT', Path(tmp) / 'store'):
             root = Path(tmp)
             path = root / 'page.png'
+            path2 = root / 'page2.png'
             draw_im.save(path)
+            draw_im.save(path2)
             source = root / 'chapter.mtp'
-            write_mtp(source, [Page(str(path), [b, b_untr])], {}, threading.Event(), lambda _: None)
+            write_mtp(source, [Page(str(path), [b, b_untr]), Page(str(path2), [b_p2])], {}, threading.Event(), lambda _: None)
             with socket.socket() as sock:
                 sock.bind(('127.0.0.1', 0))
                 server = uvicorn.Server(uvicorn.Config(studio.app, log_level='warning'))
@@ -453,6 +510,27 @@ class StudioPersistenceTests(unittest.TestCase):
                                 self.assertEqual(len(frame_labels), 9)
                                 self.assertIn('normal — ปกติ (คำพูดทั่วไป)', frame_labels)
                                 self.assertIn('terrible — น่ากลัว / กดดัน / สยองขวัญ', frame_labels)
+
+                                # Switch active font profile to '2. การ์ตูนต่อสู้', change frame_type -> font updates immediately,
+                                # and switching to Page 2 keeps the active font profile selected!
+                                tab.locator('#presetSelect').select_option('2. การ์ตูนต่อสู้')
+                                tab.wait_for_timeout(300)
+                                font_before_ft = tab.locator('#font').input_value()
+                                tab.locator('#frame').select_option('thought')
+                                tab.wait_for_timeout(450)
+                                font_after_ft = tab.locator('#font').input_value()
+                                self.assertNotEqual(font_after_ft, '')
+                                # Verify switching to page 2 retains active profile '2. การ์ตูนต่อสู้'
+                                tab.locator('#pages button').nth(1).click()
+                                tab.wait_for_timeout(300)
+                                self.assertEqual(tab.locator('#presetSelect').input_value(), '2. การ์ตูนต่อสู้')
+                                # Switch back to page 1 and restore default profile '1. มังฮวาเกาหลี' + normal frame for rest of test
+                                tab.locator('#pages button').nth(0).click()
+                                tab.wait_for_timeout(300)
+                                tab.locator('#presetSelect').select_option('1. มังฮวาเกาหลี')
+                                tab.wait_for_timeout(250)
+                                tab.locator('#frame').select_option('normal')
+                                tab.wait_for_timeout(350)
 
                                 # Test OCR Options Modal (key '1') opens & remembers lang/engine in session
                                 tab.keyboard.press('1')
@@ -598,13 +676,28 @@ class StudioPersistenceTests(unittest.TestCase):
                                 self.assertEqual(float(tab.locator('#rotation').input_value()), 0.0)
 
                                 handle = tab.locator('[data-handle=se]').bounding_box()
+                                nw_before = tab.locator('[data-handle=nw]').bounding_box()
                                 x, y = handle['x'] + 4, handle['y'] + 4
                                 old = int(tab.locator('#size').input_value())
+                                edit_reqs = []
+                                tab.on('request', lambda req: edit_reqs.append(req.url) if '/edit' in req.url else None)
                                 tab.mouse.move(x, y)
                                 tab.mouse.down()
-                                tab.mouse.move(x + 36, y + 18, steps=4)
+                                tab.mouse.move(x + 36, y + 18, steps=6)
+                                # Zero API requests during pointermove; opposite NW anchor stays strictly pinned
+                                self.assertEqual(len(edit_reqs), 0, f'Unexpected API calls during resize drag: {edit_reqs}')
+                                nw_mid = tab.locator('[data-handle=nw]').bounding_box()
+                                self.assertLessEqual(abs(nw_mid['x'] - nw_before['x']), 1.5)
+                                self.assertLessEqual(abs(nw_mid['y'] - nw_before['y']), 1.5)
+                                dragged_size = int(tab.locator('#size').input_value())
+                                self.assertGreater(dragged_size, old)
                                 tab.mouse.up()
-                                self.assertGreater(int(tab.locator('#size').input_value()), old)
+                                tab.wait_for_timeout(450)
+                                # After pointerup + server save: exact font_size and NW anchor remain pinned (no snap-back!)
+                                self.assertEqual(int(tab.locator('#size').input_value()), dragged_size)
+                                nw_after = tab.locator('[data-handle=nw]').bounding_box()
+                                self.assertLessEqual(abs(nw_after['x'] - nw_before['x']), 1.5)
+                                self.assertLessEqual(abs(nw_after['y'] - nw_before['y']), 1.5)
                                 tab.keyboard.press('Shift+ArrowRight')
                                 tab.locator('#ink').fill('#991155')
                                 tab.locator('[data-cmd=export]').click()

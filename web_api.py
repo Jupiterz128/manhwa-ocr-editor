@@ -236,11 +236,57 @@ def project_json_path(key):
         return ''
 
 
-def save(key, name, pages, masks, json_path=None):
+def default_preset_name():
+    presets = load_font_presets()
+    return '1. มังฮวาเกาหลี' if '1. มังฮวาเกาหลี' in presets else next(iter(presets))
+
+
+def project_font_preset(key):
+    with closing(store()) as db:
+        row = db.execute('SELECT state FROM projects WHERE id=?', (key,)).fetchone()
+    if not row:
+        return default_preset_name()
+    try:
+        val = str(json.loads(row[0]).get('font_preset') or '').strip()
+        if val and val in load_font_presets():
+            return val
+    except Exception:
+        pass
+    return default_preset_name()
+
+
+def resolve_preset_font(preset_name, frame_type='normal'):
+    """Resolve installed (font_choice, postscript) for a given frame_type in the active font profile."""
+    presets = load_font_presets()
+    mapping = presets.get(preset_name) or presets.get('1. มังฮวาเกาหลี') or DEFAULT_FONT_PRESETS['1. มังฮวาเกาหลี']
+    ftype = frame_type or 'normal'
+    candidates = [
+        normalize_font_choice(mapping.get(ftype, FONT_NAME)),
+        normalize_font_choice(mapping.get('normal', FONT_NAME)),
+        FONT_NAME,
+    ]
+    for cand in candidates:
+        try:
+            info = resolve_font(cand)
+            return info.choice, info.postscript
+        except Exception:
+            continue
+    info = resolve_font(FONT_NAME)
+    return info.choice, info.postscript
+
+
+def save(key, name, pages, masks, json_path=None, font_preset=None):
     if json_path is None:
         json_path = project_json_path(key)
+    if font_preset is None:
+        font_preset = project_font_preset(key)
     state = json.dumps(
-        dict(pages=[asdict(p) for p in pages], masks=masks, json_path=str(json_path or '')),
+        dict(
+            pages=[asdict(p) for p in pages],
+            masks=masks,
+            json_path=str(json_path or ''),
+            font_preset=str(font_preset or default_preset_name()),
+        ),
         ensure_ascii=False,
     )
     with closing(store()) as db, db:
@@ -265,10 +311,11 @@ def _load_json_project_file(json_file: Path):
         if bid not in masks:
             masks[bid] = encode_region(reg)
     title = str(data.get('name') or json_file.name)
-    return pages, masks, title
+    preset = str(data.get('font_preset') or '').strip() or default_preset_name()
+    return pages, masks, title, preset
 
 
-def _write_json_project_file(dest: Path, pages, masks, title):
+def _write_json_project_file(dest: Path, pages, masks, title, font_preset=None):
     dest = Path(dest)
     if dest.suffix.lower() != '.json':
         dest = dest.with_suffix('.json')
@@ -288,6 +335,7 @@ def _write_json_project_file(dest: Path, pages, masks, title):
         'version': 5,
         'studio_version': '4.0',
         'name': title,
+        'font_preset': str(font_preset or default_preset_name()),
         'pages': records,
         'studio_masks': masks,
     }
@@ -345,6 +393,7 @@ def create(files: list[UploadFile] = File(...)):
     pages = []
     masks = {}
     title = Path(files[0].filename or 'page.png').name
+    preset = default_preset_name()
     try:
         for idx, item in enumerate(files):
             dest = folder / str(idx) / Path(item.filename or 'page.png').name
@@ -355,17 +404,25 @@ def create(files: list[UploadFile] = File(...)):
             if ext == '.mtp':
                 imported, _, _ = core.read_mtp(dest, cancel, lambda _: None)
                 pages.extend(imported)
+                try:
+                    mtp_meta = json.loads(dest.read_text(encoding='utf-8-sig'))
+                    p_saved = str((mtp_meta.get('appSettings') or {}).get('studioFontPreset') or '').strip()
+                    if p_saved and p_saved in load_font_presets():
+                        preset = p_saved
+                except Exception:
+                    pass
             elif ext == '.json':
-                j_pages, j_masks, j_title = _load_json_project_file(dest)
+                j_pages, j_masks, j_title, j_preset = _load_json_project_file(dest)
                 pages.extend(j_pages)
                 masks.update(j_masks)
                 if idx == 0:
                     title = j_title
+                    preset = j_preset
             else:
                 with Image.open(dest) as im:
                     im.verify()
                 pages.append(core.Page(str(dest)))
-        save(key, title, pages, masks, json_path='')
+        save(key, title, pages, masks, json_path='', font_preset=preset)
     except Exception:
         shutil.rmtree(folder)
         raise
@@ -384,10 +441,10 @@ def open_json_project(d: dict | None = None):
     chosen = chosen.resolve()
     if not chosen.is_file():
         raise ValueError(f'ไม่พบไฟล์: {chosen}')
-    pages, masks, title = _load_json_project_file(chosen)
+    pages, masks, title, preset = _load_json_project_file(chosen)
     key = uuid.uuid4().hex
-    save(key, title, pages, masks, json_path=str(chosen))
-    return dict(cancelled=False, key=key, name=title, path=str(chosen))
+    save(key, title, pages, masks, json_path=str(chosen), font_preset=preset)
+    return dict(cancelled=False, key=key, name=title, path=str(chosen), font_preset=preset)
 
 
 @app.post('/api/pick-folder')
@@ -541,7 +598,7 @@ def apply_font_preset(key: str, d: dict):
                         laid_out += 1
                     except Exception:
                         failed += 1
-        save(key, '', pages, masks)
+        save(key, '', pages, masks, font_preset=preset_name)
         note = f'จัดฟอนต์ตามโปรไฟล์ "{preset_name}" สำเร็จ {laid_out}/{total} บอลลูน'
         if failed:
             note += f' (จัดวางไม่สำเร็จ {failed})'
@@ -550,6 +607,7 @@ def apply_font_preset(key: str, d: dict):
         return dict(
             pages=[summary(p) for p in pages],
             preset=preset_name,
+            font_preset=preset_name,
             total=total,
             laid_out=laid_out,
             failed=failed,
@@ -558,10 +616,27 @@ def apply_font_preset(key: str, d: dict):
         )
 
 
+@app.post('/api/{key}/font-preset')
+def set_project_font_preset(key: str, d: dict):
+    with lock:
+        pages, masks = load(key)
+        presets = load_font_presets()
+        preset_name = str(d.get('preset') or '').strip()
+        if not preset_name or preset_name not in presets:
+            raise ValueError(f'ไม่พบโปรไฟล์ฟอนต์ "{preset_name}"')
+        save(key, '', pages, masks, font_preset=preset_name)
+        return dict(font_preset=preset_name, note=f'ตั้งโปรไฟล์ฟอนต์หลักเป็น "{preset_name}" แล้ว')
+
+
 @app.get('/api/{key}/state')
 def state(key: str):
     pages, _ = load(key)
-    return dict(pages=[summary(p) for p in pages], fonts=list(FONT_CHOICES), json_path=project_json_path(key))
+    return dict(
+        pages=[summary(p) for p in pages],
+        fonts=list(FONT_CHOICES),
+        json_path=project_json_path(key),
+        font_preset=project_font_preset(key),
+    )
 
 
 @app.get('/api/font/{font}')
@@ -672,7 +747,7 @@ def _default_editor_box(b, layer, im):
     return [cx - full_w / 2.0, cy - full_h / 2.0, cx + full_w / 2.0, cy + full_h / 2.0]
 
 
-def text_update(im, page, b, d):
+def text_update(im, page, b, d, font_preset=None):
     if 'bubble_box' in d:
         b.box = _clip_bubble_box(d['bubble_box'], im)
         b.quad = []
@@ -682,23 +757,60 @@ def text_update(im, page, b, d):
     for k in ('text', 'translation', 'frame_type', 'font_choice'):
         if k in d:
             setattr(b, k, d[k])
+    font_synced = False
+    manual_font_set = 'font_choice' in d
     if 'frame_type' in d:
         b.frame_type_locked = True
+        if not manual_font_set:
+            active_preset = str(d.get('font_preset') or font_preset or default_preset_name())
+            chosen_font, _ = resolve_preset_font(active_preset, b.frame_type)
+            b.font_choice = chosen_font
+            font_synced = True
     if not b.translation.strip():
         b.text_layer = {}
         return
     if 'bubble_box' in d and not any(
-        k in d for k in ('translation', 'font_choice', 'box', 'rotation', 'font_size', 'alignment', 'wrapped', 'color', 'hidden', 'style')
+        k in d
+        for k in (
+            'translation',
+            'font_choice',
+            'frame_type',
+            'box',
+            'rotation',
+            'font_size',
+            'alignment',
+            'wrapped',
+            'color',
+            'hidden',
+            'style',
+        )
     ):
         return
     previous = b.text_layer
     layer = previous
-    if not layer or any(k in d for k in ('translation', 'font_choice')):
+    if not layer or 'translation' in d:
         layer = layout_text(compose_page(im, page.clean_patches), b)
         if previous.get('editor_box'):
             for field in ('editor_box', 'rotation', 'alignment', 'color', 'hidden', 'font_size'):
                 if field in previous:
                     layer[field] = previous[field]
+        if previous.get('manual_effects'):
+            for field in ('stroke', 'gradient', 'manual_effects'):
+                if field in previous:
+                    layer[field] = previous[field]
+    elif manual_font_set or font_synced:
+        # Update font immediately on existing text_layer without resetting user's editor_box or font_size!
+        info = resolve_font(normalize_font_choice(b.font_choice or FONT_NAME))
+        b.font_choice = info.choice
+        layer['font'] = info.postscript
+        if info.choice != FONT_NAME:
+            layer['font_choice'] = info.choice
+        else:
+            layer.pop('font_choice', None)
+    if manual_font_set:
+        layer['manual_font'] = True
+    elif font_synced:
+        layer['manual_font'] = False
     old = layer.get('editor_box')
     if old is None:
         old = _default_editor_box(b, layer, im)
@@ -719,11 +831,28 @@ def text_update(im, page, b, d):
         scale_fit = min(im.width / max(1e-6, rw), im.height / max(1e-6, rh)) * 0.998
         tw_fit, th_fit = w * scale_fit, h * scale_fit
         rw, rh = tw_fit * cs + th_fit * sn, tw_fit * sn + th_fit * cs
-    cx = min(max((x + r) / 2, rw / 2), im.width - rw / 2)
-    cy = min(max((y + bt) / 2, rh / 2), im.height - rh / 2)
-    rect = [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2]
+    # Respect the exact user-dragged editor_box without snapping or warping its anchor.
+    # Clamp only the exported outer AABB `box` into page bounds for validate_layer/PSD.
+    if abs(angle) < 1e-6:
+        ex0 = max(0.0, min(float(im.width) - min(w, float(im.width)), x))
+        ey0 = max(0.0, min(float(im.height) - min(h, float(im.height)), y))
+        ex1 = min(float(im.width), ex0 + min(w, float(im.width)))
+        ey1 = min(float(im.height), ey0 + min(h, float(im.height)))
+        rect = [ex0, ey0, ex1, ey1]
+        tw_fit, th_fit = ex1 - ex0, ey1 - ey0
+        box_aabb = list(rect)
+    else:
+        rect = [x, y, r, bt]
+        cx = min(max((x + r) / 2.0, rw / 2.0), float(im.width) - rw / 2.0)
+        cy = min(max((y + bt) / 2.0, rh / 2.0), float(im.height) - rh / 2.0)
+        box_aabb = [
+            max(0.0, cx - rw / 2.0),
+            max(0.0, cy - rh / 2.0),
+            min(float(im.width), cx + rw / 2.0),
+            min(float(im.height), cy + rh / 2.0),
+        ]
     layer.update(
-        box=[max(0.0, cx - rw / 2), max(0.0, cy - rh / 2), min(float(im.width), cx + rw / 2), min(float(im.height), cy + rh / 2)],
+        box=box_aabb,
         editor_box=rect,
         font_size=size,
         rotation=angle,
@@ -733,10 +862,15 @@ def text_update(im, page, b, d):
         text_size=[tw_fit, th_fit],
         custom_size=round(size),
     )
-    if 'wrapped' in d:
-        if ''.join(d['wrapped'].split()) != ''.join(b.translation.split()):
+    if 'wrapped' in d and d['wrapped'] is not None:
+        wrapped = str(d['wrapped'])
+        w_compact = ''.join(wrapped.split())
+        valid_targets = {''.join(b.translation.split())}
+        if layer.get('text'):
+            valid_targets.add(''.join(str(layer['text']).split()))
+        if w_compact not in valid_targets:
             raise ValueError('ข้อความพรีวิวไม่ตรงกับคำแปล')
-        layer['text'] = d['wrapped']
+        layer['text'] = wrapped
     b.custom_size = round(size)
     b.custom_rotation = angle
     for k in ('color', 'hidden'):
@@ -889,7 +1023,7 @@ def save_json_project(key: str, d: dict | None = None):
             )
         if dest is None:
             return dict(cancelled=True)
-        resolved = _write_json_project_file(dest, pages, masks, title)
+        resolved = _write_json_project_file(dest, pages, masks, title, font_preset=project_font_preset(key))
         save(key, title, pages, masks, json_path=str(resolved))
         return dict(
             cancelled=False,
@@ -908,6 +1042,7 @@ def import_txt(key: str, d: dict):
         if not changes:
             raise ValueError('ไม่พบคำแปลที่จับคู่กับกรอบในโปรเจกต์นี้ — ตรวจรูปแบบรหัสกรอบหรือเลขข้อ')
         frame_tags = report.get('frame_tags') or {}
+        active_preset = project_font_preset(key)
         laid_out = 0
         layout_failed = 0
         for p in pages:
@@ -917,10 +1052,13 @@ def import_txt(key: str, d: dict):
                     continue
                 if im is None:
                     im = core.load_image(p.path)
+                was_manual_font = bool((b.text_layer or {}).get('manual_font'))
                 b.translation = changes[b.id]
                 if b.id in frame_tags:
                     b.frame_type = frame_tags[b.id]
                     b.frame_type_locked = True
+                if not was_manual_font:
+                    b.font_choice, _ = resolve_preset_font(active_preset, b.frame_type or 'normal')
                 # Reset stale manual box so newly imported Thai text centers cleanly
                 b.text_layer = {}
                 b.custom_size = 0
@@ -928,7 +1066,9 @@ def import_txt(key: str, d: dict):
                 b.text_offset = []
                 b.custom_rotation = None
                 try:
-                    text_update(im, p, b, {'translation': b.translation})
+                    text_update(im, p, b, {'translation': b.translation}, font_preset=active_preset)
+                    if was_manual_font and b.text_layer:
+                        b.text_layer['manual_font'] = True
                     laid_out += 1
                 except Exception:
                     layout_failed += 1
@@ -961,6 +1101,7 @@ def batch_action(key: str, action: str, d: dict):
             for k_sess in [k for k in mask_sessions if k[0] == key]:
                 mask_sessions.pop(k_sess, None)
             pipe = reader(lang=lang, engine=engine, neural=True, type_scan=False)
+            active_preset = project_font_preset(key)
             total = 0
             for p in pages:
                 for old in p.bubbles:
@@ -968,6 +1109,8 @@ def batch_action(key: str, action: str, d: dict):
                     masks.pop('undo:' + old.id, None)
                 im = core.load_image(p.path)
                 p.bubbles = _filter_ocr_bubbles(pipe.scan(im))
+                for b in p.bubbles:
+                    b.font_choice, _ = resolve_preset_font(active_preset, b.frame_type or 'normal')
                 p.clean_patches = []
                 total += len(p.bubbles)
             note = f'OCR ({engine} · {lang}) สำเร็จ {len(pages)} หน้า • {total} กรอบ'
@@ -1019,13 +1162,15 @@ def action(key: str, n: int, action: str, d: dict):
         im = core.load_image(p.path)
         note = ''
         extra_out = {}
+        active_preset = str(d.get('font_preset') or project_font_preset(key))
         if action == 'edit' and b:
-            text_update(im, p, b, d)
+            text_update(im, p, b, d, font_preset=active_preset)
             if 'bubble_box' in d:
                 masks.pop(b.id, None)
                 masks.pop('undo:' + b.id, None)
         elif action == 'add_bubble':
             box = _clip_bubble_box(d.get('box'), im)
+            default_font, _ = resolve_preset_font(active_preset, 'normal')
             new_b = core.Bubble(
                 box=box,
                 text='',
@@ -1034,6 +1179,7 @@ def action(key: str, n: int, action: str, d: dict):
                 score=1.0,
                 engine='manual',
                 frame_type='normal',
+                font_choice=default_font,
             )
             p.bubbles.append(new_b)
             extra_out['id'] = new_b.id
@@ -1065,6 +1211,8 @@ def action(key: str, n: int, action: str, d: dict):
                 masks.pop('undo:' + old.id, None)
                 mask_sessions.pop((key, n, old.id), None)
             p.bubbles = _filter_ocr_bubbles(reader(lang=lang, engine=engine, neural=True, type_scan=False).scan(im))
+            for item in p.bubbles:
+                item.font_choice, _ = resolve_preset_font(active_preset, item.frame_type or 'normal')
             p.clean_patches = []
         elif action == 'translate':
             from gemini_translator import translate_pages_with_gemini
@@ -1073,7 +1221,9 @@ def action(key: str, n: int, action: str, d: dict):
             hint = ('เกลาสำนวนคำแปลเดิม: ' + b.translation) if b else ''
             translate_pages_with_gemini([temp], overwrite=True, translation_note=hint)
             for item in targets:
-                text_update(im, p, item, {'translation': item.translation})
+                if not (item.text_layer or {}).get('manual_font'):
+                    item.font_choice, _ = resolve_preset_font(active_preset, item.frame_type or 'normal')
+                text_update(im, p, item, {'translation': item.translation}, font_preset=active_preset)
         elif action == 'paint' and b:
             reg = decode_region(masks[b.id]) if b.id in masks else prepare_region(im, b)
             history = masks.setdefault('undo:' + b.id, [])
@@ -1197,6 +1347,8 @@ def export(key: str, d: dict):
         folder = ROOT / key / 'exports' / job
         folder.mkdir(parents=True)
     stem = Path(project_name(key)).stem or 'project'
+    active_preset = project_font_preset(key)
+    preset_map = load_font_presets().get(active_preset) or DEFAULT_FONT_PRESETS['1. มังฮวาเกาหลี']
     progress = jobs[job] = dict(done=False, value=0, files=[], paths=[], folder=str(folder))
 
     def run():
@@ -1215,7 +1367,13 @@ def export(key: str, d: dict):
                 progress['value'] = int(i * 80 / len(pages))
             if fmt != 'psd':
                 out = _unique_path(folder, stem if dest_dir else 'project', '.mtp')
-                core.write_mtp(out, pages, {}, cancel, lambda _: None)
+                core.write_mtp(out, pages, preset_map, cancel, lambda _: None)
+                try:
+                    mtp_obj = json.loads(out.read_text(encoding='utf-8-sig'))
+                    mtp_obj.setdefault('appSettings', {})['studioFontPreset'] = active_preset
+                    core.atomic_json(out, mtp_obj)
+                except Exception:
+                    pass
                 files.append(out)
             progress['files'] = [f.name for f in files]
             progress['paths'] = [str(f.resolve()) for f in files]
