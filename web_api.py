@@ -36,6 +36,7 @@ from text_layout import (
     FONT_NAME,
     FRAME_TYPES,
     FRAME_TYPE_LABELS,
+    extract_frame_tag,
     classify_bubble_type,
     detect_and_parse_translations,
     export_source_script,
@@ -565,47 +566,48 @@ def apply_font_preset(key: str, d: dict):
 
         total = 0
         laid_out = 0
-        failed = 0
+        errors = []
         for p in targets:
             raw_im = core.load_image(p.path)
             work_im = compose_page(raw_im, p.clean_patches) if p.clean_patches else raw_im
             for b in p.bubbles:
                 total += 1
-                ftype = classify_bubble_type(raw_im, b)
+                candidate = copy.copy(b)
+                ftype = candidate.frame_type
+                if ftype not in FRAME_TYPE_LABELS or extract_frame_tag(candidate.translation or '')[0]:
+                    ftype = classify_bubble_type(raw_im, candidate)
                 chosen_font = resolved_map.get(ftype, fallback_font)
-                b.frame_type = ftype
-                b.font_choice = chosen_font
-                b.custom_size = 0
-                b.custom_width = 0
-                b.text_offset = []
-                b.custom_rotation = None
-                if b.translation.strip():
-                    prev_fx = {k: b.text_layer[k] for k in ('stroke', 'gradient', 'manual_effects') if b.text_layer and k in b.text_layer}
+                candidate.frame_type = ftype
+                candidate.font_choice = chosen_font
+                candidate.custom_size = candidate.custom_width = 0
+                candidate.text_offset = []
+                candidate.custom_rotation = None
+                candidate.manual_font = False
+                if candidate.translation.strip():
                     try:
-                        layer = layout_text(
-                            raw_im if b.engine == 'MTP' else work_im,
-                            b,
-                            b.translation,
-                            font_choice=chosen_font,
-                            original=raw_im,
-                            cleaned=work_im if p.clean_patches else None,
-                            custom_size=0,
-                            custom_width=0,
-                            text_offset=[],
-                            custom_rotation=None,
-                        )
-                        layer['editor_box'] = _default_editor_box(b, layer, raw_im)
-                        if prev_fx.get('manual_effects'):
-                            layer.update(prev_fx)
+                        previous = candidate.text_layer or {}
+                        layer = layout_text(work_im, candidate, original=raw_im, cleaned=work_im,
+                                            page_bubbles=p.bubbles)
+                        layer['editor_box'] = _default_editor_box(candidate, layer, raw_im)
+                        if previous.get('manual_effects') and 'color' in previous:
+                            layer['color'] = previous['color']
+                        if previous.get('hidden'):
+                            layer['hidden'] = True
+                        candidate.text_layer = layer
+                        if previous.get('manual_position') and previous.get('editor_box'):
+                            text_update(raw_im,p,candidate,{'box':previous['editor_box'],
+                                        'rotation':previous.get('rotation',0)})
                         validate_layer(layer)
-                        b.text_layer = layer
+                        candidate.font_choice = layer.get('font_choice', FONT_NAME)
                         laid_out += 1
-                    except Exception:
-                        failed += 1
+                    except Exception as exc:
+                        errors.append(f'{Path(p.path).name} · {b.id}: {exc}')
+                        continue
+                vars(b).update(vars(candidate))
         save(key, '', pages, masks, font_preset=preset_name)
         note = f'จัดฟอนต์ตามโปรไฟล์ "{preset_name}" สำเร็จ {laid_out}/{total} บอลลูน'
-        if failed:
-            note += f' (จัดวางไม่สำเร็จ {failed})'
+        if errors:
+            note += f' (จัดวางไม่สำเร็จ {len(errors)} กรอบ · {errors[0]})'
         if missing_fonts:
             note += f' • ใช้ฟอนต์สำรองแทน {", ".join(sorted(missing_fonts))}'
         return dict(
@@ -614,7 +616,8 @@ def apply_font_preset(key: str, d: dict):
             font_preset=preset_name,
             total=total,
             laid_out=laid_out,
-            failed=failed,
+            failed=len(errors),
+            errors=errors,
             missing_fonts=sorted(missing_fonts),
             note=note,
         )
@@ -768,8 +771,8 @@ def _default_editor_box(b, layer, im):
     tw, th = layer.get('text_size', (x1 - x0, y1 - y0))
     full_w = min(float(im.width), max(float(bx1 - bx0), float(tw) + 2.0 * pad_x))
     full_h = min(float(im.height), max(float(by1 - by0), float(th) + 2.0 * pad_y))
-    cx = min(max(cx, full_w / 2.0), float(im.width) - full_w / 2.0)
-    cy = min(max(cy, full_h / 2.0), float(im.height) - full_h / 2.0)
+    full_w = min(full_w, 2*cx, 2*(im.width-cx))
+    full_h = min(full_h, 2*cy, 2*(im.height-cy))
     return [cx - full_w / 2.0, cy - full_h / 2.0, cx + full_w / 2.0, cy + full_h / 2.0]
 
 
@@ -792,6 +795,8 @@ def text_update(im, page, b, d, font_preset=None):
             chosen_font, _ = resolve_preset_font(active_preset, b.frame_type)
             b.font_choice = chosen_font
             font_synced = True
+    if manual_font_set or font_synced:
+        b.manual_font = manual_font_set
     if not b.translation.strip():
         b.text_layer = {}
         return
@@ -815,8 +820,9 @@ def text_update(im, page, b, d, font_preset=None):
     previous = b.text_layer
     layer = previous
     if not layer or 'translation' in d:
-        layer = layout_text(compose_page(im, page.clean_patches), b)
-        if previous.get('editor_box'):
+        layer = layout_text(compose_page(im, page.clean_patches), b, original=im, page_bubbles=page.bubbles)
+        if previous.get('manual_position') and previous.get('editor_box'):
+            layer['manual_position'] = True
             for field in ('editor_box', 'rotation', 'alignment', 'color', 'hidden', 'font_size'):
                 if field in previous:
                     layer[field] = previous[field]
@@ -888,6 +894,8 @@ def text_update(im, page, b, d, font_preset=None):
         text_size=[tw_fit, th_fit],
         custom_size=round(size),
     )
+    if 'box' in d:
+        layer['manual_position'] = True
     if 'wrapped' in d and d['wrapped'] is not None:
         wrapped = str(d['wrapped'])
         w_compact = ''.join(wrapped.split())
@@ -1078,19 +1086,20 @@ def import_txt(key: str, d: dict):
                     continue
                 if im is None:
                     im = core.load_image(p.path)
-                was_manual_font = bool((b.text_layer or {}).get('manual_font'))
+                was_manual_font = b.manual_font or bool((b.text_layer or {}).get('manual_font'))
                 b.translation = changes[b.id]
                 if b.id in frame_tags:
                     b.frame_type = frame_tags[b.id]
                     b.frame_type_locked = True
                 if not was_manual_font:
                     b.font_choice, _ = resolve_preset_font(active_preset, b.frame_type or 'normal')
-                # Reset stale manual box so newly imported Thai text centers cleanly
-                b.text_layer = {}
-                b.custom_size = 0
-                b.custom_width = 0
-                b.text_offset = []
-                b.custom_rotation = None
+                # Imported geometry is provisional until the user moves the text with V.
+                if not b.text_layer.get('manual_position'):
+                    b.text_layer = {}
+                    b.custom_size = 0
+                    b.custom_width = 0
+                    b.text_offset = []
+                    b.custom_rotation = None
                 try:
                     text_update(im, p, b, {'translation': b.translation}, font_preset=active_preset)
                     if was_manual_font and b.text_layer:
@@ -1213,11 +1222,34 @@ def action(key: str, n: int, action: str, d: dict):
             return dict(color=list(im.convert('RGB').getpixel(tuple(xy))))
         if action == 'edit' and b:
             text_update(im, p, b, d, font_preset=active_preset)
+            if 'font_choice' in d or 'frame_type' in d:
+                category = b.frame_type or b.detected_frame_type or 'normal'
+                font = resolve_font(b.font_choice)
+                changed_pages = {}
+                first = next(i+1 for i,item in enumerate(p.bubbles) if item.id==b.id)
+                for page_idx in range(n,len(pages)):
+                    following = pages[page_idx]
+                    start = first if page_idx==n else 0
+                    for item in following.bubbles[start:]:
+                        item_type = item.frame_type or item.detected_frame_type or 'normal'
+                        if item_type != category or item.manual_font or item.text_layer.get('manual_font'):
+                            continue
+                        item.font_choice = font.choice
+                        if item.text_layer:
+                            item.text_layer.update(font=font.postscript,font_choice=font.choice)
+                        if page_idx != n:
+                            changed_pages[page_idx] = following
+                extra_out['following_pages'] = {i:summary(pg) for i,pg in changed_pages.items()}
+                if 'font_choice' in d:
+                    presets = load_font_presets()
+                    presets[active_preset][category] = font.choice
+                    save_font_presets(presets)
+                    extra_out['presets'] = presets
             if 'bubble_box' in d:
                 masks.pop(b.id, None)
                 masks.pop('undo:' + b.id, None)
         elif action == 'page_font':
-            previous = {item.id: [item.font_choice, item.text_layer.get('manual_font')] for item in p.bubbles}
+            previous = {item.id: [item.font_choice, item.text_layer.get('manual_font', True if item.manual_font else None)] for item in p.bubbles}
             applied = {}
             for item in p.bubbles:
                 requested = d.get('fonts', {}).get(item.id) if 'fonts' in d else [d['font'], True]
@@ -1226,6 +1258,7 @@ def action(key: str, n: int, action: str, d: dict):
                 font, manual = requested
                 info = resolve_font(normalize_font_choice(font))
                 item.font_choice = info.choice
+                item.manual_font = bool(manual)
                 if item.text_layer:
                     item.text_layer.update(font=info.postscript, font_choice=info.choice)
                 if item.text_layer:
@@ -1295,7 +1328,7 @@ def action(key: str, n: int, action: str, d: dict):
             hint = ('เกลาสำนวนคำแปลเดิม: ' + b.translation) if b else ''
             translate_pages_with_gemini([temp], overwrite=True, translation_note=hint)
             for item in targets:
-                if not (item.text_layer or {}).get('manual_font'):
+                if not item.manual_font and not (item.text_layer or {}).get('manual_font'):
                     item.font_choice, _ = resolve_preset_font(active_preset, item.frame_type or 'normal')
                 text_update(im, p, item, {'translation': item.translation}, font_preset=active_preset)
         elif action == 'paint' and b:

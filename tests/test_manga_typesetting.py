@@ -9,6 +9,21 @@ from PIL import Image,ImageDraw
 
 @unittest.skipUnless(sys.platform=='win32','Windows Thai shaping required')
 class MangaTypesettingTests(unittest.TestCase):
+    def test_two_anchors_in_one_interior_get_separate_text(self):
+        from unittest.mock import patch
+        import numpy as np
+        im=Image.new('RGB',(280,360),'white')
+        mask=np.zeros((360,280),np.uint8)
+        mask[30:330,40:240]=255
+        first=Bubble([100,130,180,165],translation='คำแรก')
+        second=Bubble([100,156,180,191],translation='คำต่อมา')
+        pages=[first,second]
+        with patch('text_layout.BUBBLE_SEGMENTER.segment_bubble',return_value=([0,0,280,360],mask)):
+            for same_center in (False,True):
+                if same_center:second.box=list(first.box)
+                top,bottom=[layout_text(im,b,page_bubbles=pages)['box'] for b in pages]
+                self.assertLess(top[3],bottom[1])
+
     def test_two_lines_lower_is_slightly_longer(self):
         text='ตอนเจอกันครั้งแรก เธอก็มาทำผมให้ฉันนี่'
         with TextRenderer(42,find_font()[0]) as r:

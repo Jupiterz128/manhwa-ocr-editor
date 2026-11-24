@@ -379,6 +379,7 @@ class Bubble:
     detector_class: int = -1
     frame_type_locked: bool = False
     detected_frame_type: str = ''
+    manual_font: bool = False
 
 
 @dataclass

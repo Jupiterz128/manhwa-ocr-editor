@@ -483,7 +483,7 @@ class BubbleSegmenter:
         bw=max(8.0,float(bubble_box[2]-bubble_box[0]))
         bh=max(8.0,float(bubble_box[3]-bubble_box[1]))
         if bw>2400 or bh>2400:return None
-        pad=max(128,min(320,int(round(max(bw,bh)*.85)))) if use_nano else max(36,min(260,int(round(max(bw,bh)*.70))))
+        pad=max(256,min(512,int(round(max(bw,bh)*.85)))) if use_nano else max(36,min(260,int(round(max(bw,bh)*.70))))
         cbox=bounded_box(bubble_box,image.size,pad)
         cw,ch=cbox[2]-cbox[0],cbox[3]-cbox[1]
         if cw<24 or ch<24:return None
@@ -1443,9 +1443,27 @@ def _symmetric_row_halfwidths(safe_mask,cx):
     return out
 
 
+def _anchor_lobe(mask, anchor):
+    """Keep the chamber nearest this OCR anchor when a narrow neck joins balloons."""
+    distance=cv2.distanceTransform(mask,cv2.DIST_L2,5)
+    x=int(np.clip(round(anchor[0]),0,mask.shape[1]-1))
+    y=int(np.clip(round(anchor[1]),0,mask.shape[0]-1))
+    for fraction in (.32,.45,.58,.68):
+        seeds=(distance>distance.max()*fraction).astype(np.uint8)
+        count,labels,stats,_=cv2.connectedComponentsWithStats(seeds)
+        if count<3:continue
+        sizes=stats[1:,cv2.CC_STAT_AREA]
+        kept=np.flatnonzero(sizes>=max(100,sizes.max()*.14))+1
+        if len(kept)<2:continue
+        _,nearest=cv2.distanceTransformWithLabels((~np.isin(labels,kept)).astype(np.uint8),
+                                                 cv2.DIST_L2,5,labelType=cv2.DIST_LABEL_CCOMP)
+        return np.where(nearest==nearest[y,x],mask,0).astype(np.uint8)
+    return mask
+
+
 def _mtp_enclosed_body(image,box):
     """Recover a closed balloon surrounding a small imported text anchor."""
-    roi=bounded_box(box,image.size,max(160,min(400,int(max(box[2]-box[0],box[3]-box[1])))))
+    roi=bounded_box(box,image.size,max(640,min(900,3*int(max(box[2]-box[0],box[3]-box[1])))))
     gray=np.asarray(image.crop(roi).convert('L'))
     edges=cv2.morphologyEx(cv2.Canny(gray,30,100),cv2.MORPH_CLOSE,np.ones((3,3),np.uint8))
     contours,_=cv2.findContours(edges,cv2.RETR_LIST,cv2.CHAIN_APPROX_SIMPLE)
@@ -1461,10 +1479,22 @@ def _mtp_enclosed_body(image,box):
         cv2.drawContours(safe,[contour],-1,255,-1)
         if np.percentile(gray[safe>0],80)-np.percentile(gray[safe>0],20)>45:continue
         return roi,cv2.erode(safe,cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(13,13)))
+    # Joined white balloons can have a low fill ratio across their common box.
+    # Reject open regions and page margins before separating the chambers.
+    light=(gray>=225).astype(np.uint8)
+    shapes,_=cv2.findContours(light,cv2.RETR_LIST,cv2.CHAIN_APPROX_SIMPLE)
+    for contour in sorted(shapes,key=cv2.contourArea):
+        x,y,w,h=cv2.boundingRect(contour)
+        if x<=1 or y<=1 or x+w>=gray.shape[1]-1 or y+h>=gray.shape[0]-1:continue
+        if cv2.contourArea(contour)<anchor_area or cv2.pointPolygonTest(contour,center,True)<4:continue
+        body=np.zeros_like(gray)
+        cv2.drawContours(body,[contour],-1,255,-1)
+        if np.mean(light[body>0])<.72:continue
+        return roi,cv2.erode(body,cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(13,13)))
     return None
 
 
-def _bubble_interior_region(image,bubble):
+def _bubble_interior_region(image,bubble,page_bubbles=()):
     bx0,by0,bx1,by1=[int(round(v)) for v in bubble.box]
     bw=max(1,bx1-bx0);bh=max(1,by1-by0)
     if bw<=16 and bh<=16:
@@ -1480,10 +1510,11 @@ def _bubble_interior_region(image,bubble):
         else:safe[:,:]=255
         return rbox,safe,False
     seg_out=BUBBLE_SEGMENTER.segment_bubble(image,bubble.box,margin=6)
-    if seg_out is None and getattr(bubble,"engine","")=="MTP":
+    if seg_out is None and getattr(bubble,'engine','')=='MTP':
         seg_out=_mtp_enclosed_body(image,bubble.box)
     if seg_out is not None:
         rbox,safe=seg_out
+        safe=_anchor_lobe(safe,((bx0+bx1)/2-rbox[0],(by0+by1)/2-rbox[1]))
         found=True
     else:
         region=prepare_region(image,bubble,margin=6)
@@ -1511,6 +1542,32 @@ def _bubble_interior_region(image,bubble):
     if not found and not narration:
         rx=max(1.0,bw/2.0);ry=max(1.0,bh/2.0)
         safe[((gx-(bx0+bx1)/2.0)/rx)**2+((gy-(by0+by1)/2.0)/ry)**2>1.0]=0
+    # Multiple dialogue anchors can share one connected interior. Partition it in
+    # page coordinates before choosing the text centre and fitting the curved rows.
+    cx,cy=(bx0+bx1)/2,(by0+by1)/2
+    interior=safe
+    coincident=[]
+    for other in page_bubbles:
+        x0,y0,x1,y1=other.box
+        ox,oy=(x0+x1)/2,(y0+y1)/2
+        if (ox,oy)==(cx,cy):
+            coincident.append(other.id)
+            continue
+        ix,iy=round(ox-rbox[0]),round(oy-rbox[1])
+        if not (0<=iy<safe.shape[0] and 0<=ix<safe.shape[1] and interior[iy,ix]):continue
+        dx,dy=ox-cx,oy-cy
+        distance=np.hypot(dx,dy)
+        if distance<1:continue
+        if safe is interior:safe=interior.copy()
+        gap=min(4.0,distance*.06)
+        safe[(gx-(cx+ox)/2)*dx+(gy-(cy+oy)/2)*dy >= -gap*distance]=0
+    if len(coincident)>1 and bubble.id in coincident and np.any(safe):
+        rows=np.flatnonzero(safe.any(axis=1))
+        cuts=np.linspace(rows[0],rows[-1]+1,len(coincident)+1).round().astype(int)
+        rank=coincident.index(bubble.id)
+        safe=safe.copy()
+        safe[:cuts[rank]+2]=0
+        safe[max(0,cuts[rank+1]-2):]=0
     return rbox,safe,found
 
 
@@ -1661,10 +1718,13 @@ def _thai_optical_dy(text,font_size,safe_mask,cx,cy,tile_w,tile_h):
 
 
 def layout_text(image,bubble,translation=None,font_choice=None,custom_size=None,custom_width=None,text_offset=None,custom_rotation=None,
-                *, original=None, cleaned=None, auto_stroke=False, auto_gradient=False):
+                *, original=None, cleaned=None, auto_stroke=False, auto_gradient=False, page_bubbles=()):
     from text_style_sampler import effects, sample_style
     previous = getattr(bubble, 'text_layer', None) or {}
-    layer = _position_text(image,bubble,translation,font_choice,custom_size,custom_width,text_offset,custom_rotation)
+    geometry = original if original is not None else image
+    layer = _position_text(geometry,bubble,translation,font_choice,custom_size,custom_width,text_offset,custom_rotation,page_bubbles)
+    if geometry is not image:
+        layer['color'] = _sample_text_color(image,layer['box'])
     style = effects(previous)
     manual = previous.get('manual_effects', False)
     if (auto_stroke or auto_gradient) and not manual:
@@ -1678,7 +1738,7 @@ def layout_text(image,bubble,translation=None,font_choice=None,custom_size=None,
     return layer
 
 
-def _position_text(image,bubble,translation=None,font_choice=None,custom_size=None,custom_width=None,text_offset=None,custom_rotation=None):
+def _position_text(image,bubble,translation=None,font_choice=None,custom_size=None,custom_width=None,text_offset=None,custom_rotation=None,page_bubbles=()):
     """Fit in the frame's own axes, then carry its rotation and user offset to preview and PSD."""
     chosen=normalize_font_choice(font_choice or getattr(bubble,'font_choice',None) or FONT_NAME)
     c_size=int(getattr(bubble,'custom_size',0) if custom_size is None else custom_size)
@@ -1687,7 +1747,7 @@ def _position_text(image,bubble,translation=None,font_choice=None,custom_size=No
     c_rot=_normalize_rotation(getattr(bubble,'custom_rotation',None) if custom_rotation is None else custom_rotation)
     q=[list(p) for p in getattr(bubble,'quad',[])]
     if not valid_quad(q) or abs(quad_angle(q))<.1:
-        layer=_layout_text(image,bubble,translation,font_choice=chosen,custom_size=c_size,custom_width=c_width)
+        layer=_layout_text(image,bubble,translation,font_choice=chosen,custom_size=c_size,custom_width=c_width,page_bubbles=page_bubbles)
         layer['bubble_quad']=q
         if offset:
             old_b=layer['box']
@@ -1708,7 +1768,7 @@ def _position_text(image,bubble,translation=None,font_choice=None,custom_size=No
     basis=np.array([[np.cos(r),-np.sin(r)],[np.sin(r),np.cos(r)]])
     mtp_shape=None
     if getattr(bubble,'engine','')=='MTP':
-        rbox,mask,found=_bubble_interior_region(image,bubble)
+        rbox,mask,found=_bubble_interior_region(image,bubble,page_bubbles)
         if found and np.any(mask):
             mtp_shape=(rbox,mask)
     points=np.asarray(q)
@@ -1817,7 +1877,7 @@ def _try_fit_boxes(render_text,boxes,info,low,high,safe_mask=None,safe_origin=(0
     return best
 
 
-def _layout_text(image,bubble,translation=None,box_options=None,font_choice=None,custom_size=0,custom_width=0,local_safe=None,local_origin=None):
+def _layout_text(image,bubble,translation=None,box_options=None,font_choice=None,custom_size=0,custom_width=0,local_safe=None,local_origin=None,page_bubbles=()):
     from windows_text import TextRenderer
     raw_text=(bubble.translation if translation is None else translation).strip().replace('\r\n','\n').replace('\r','\n')
     if not raw_text:raise ValueError('กรอบนี้ยังไม่มีคำแปลไทย')
@@ -1829,7 +1889,7 @@ def _layout_text(image,bubble,translation=None,box_options=None,font_choice=None
         boxes,found=box_options
         safe_mask=local_safe;safe_origin=local_origin or (0,0)
     else:
-        rbox,safe_mask,found=_bubble_interior_region(image,bubble)
+        rbox,safe_mask,found=_bubble_interior_region(image,bubble,page_bubbles)
         safe_origin=(rbox[0],rbox[1])
         boxes=[]
         for x0,y0,x1,y1 in centered_rectangle(safe_mask,alternatives=True):
@@ -1901,7 +1961,7 @@ def _layout_text(image,bubble,translation=None,box_options=None,font_choice=None
             area=float(np.count_nonzero(safe_mask))
             fullness=min(.46,.08+.008*units)
             density_cap=max(8,round(np.sqrt(area*fullness/max(1,units))/body_ratio))
-            if getattr(bubble,'engine','')=='MTP':
+            if area>bw_full*bh_full*1.2 or getattr(bubble,'engine','')=='MTP':
                 cap=min(110,max(8,round(extent*(.34 if short else .65))),density_cap)
                 max_block_w=max_block_h=0
             else:

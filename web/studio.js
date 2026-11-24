@@ -54,6 +54,10 @@ async function flush(){
   const p=pending;pending=null;
   chain=chain.catch(()=>{}).then(async()=>{
    const res=await api(p.key+'/page/'+p.n+'/edit',{...p.data,id:p.id});
+   if(key===p.key){
+    if(res.presets)fontPresets=res.presets;
+    for(const [idx,pg] of Object.entries(res.following_pages||{}))pages[idx]=pg
+   }
    if(key===p.key && !pending && !drag && !sliderDragging && p.seq===editSeq){
     pages[p.n]=res.page;if(n===p.n){sidebar();draw()}
    }
@@ -703,7 +707,7 @@ async function applyFontPreset(){
  if(!key||!pages.length){info('เปิดโปรเจกต์ก่อนจัดฟอนต์ตามโปรไฟล์');return}
  const preset=$('presetSelect')?.value||selectedPreset;
  await withBusy(async()=>{
-  const res=await api(key+'/apply-font-preset',{preset,all_pages:true});
+  const res=await api(key+'/apply-font-preset',{preset,page:n,all_pages:$('presetScope').value==='all'});
   pages=res.pages;if(!bubble())id=page()?.bubbles[0]?.id||'';
   view='thai';revision++;refresh();info(res.note)
  },'กำลังจัดฟอนต์ตามโปรไฟล์…')
