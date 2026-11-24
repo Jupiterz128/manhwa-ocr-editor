@@ -45,6 +45,7 @@ def options():
                    default=os.environ.get('MANHWA_PSD_BACKEND', DEFAULT_PSD_BACKEND))
     p.add_argument('--auto-translate-gemini', '--auto-translate', dest='auto_translate_gemini',
                    nargs='?', const=True, default=False, type=boolean)
+    p.add_argument('--translation-note', type=str, default='')
     p.add_argument('--gemini-model', default=None)
     args=p.parse_args()
     if bool(args.drive_link)!=bool(args.input_mode):
@@ -162,6 +163,7 @@ def run(args):
             tr_report = translate_pages_with_gemini(
                 pages,
                 source_lang=args.lang,
+                translation_note=args.translation_note,
                 model=args.gemini_model or DEFAULT_GEMINI_MODEL,
                 log=print,
             )

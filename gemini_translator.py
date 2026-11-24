@@ -10,23 +10,28 @@ from text_layout import FRAME_TYPE_LABELS, extract_frame_tag, normalize
 COMPONENT_VERSION = '3.1'
 DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash'
 
-_SYSTEM_PROMPT = """คุณคือนักแปลมังฮวา/มังงะมืออาชีพจากต้นฉบับเป็นภาษาไทย
-กติกาการแปล:
-1. แปลทุกกรอบตามลำดับบริบทของทั้งตอนให้ต่อเนื่องกัน ใช้ภาษาพูดที่เป็นธรรมชาติ เหมาะกับการ์ตูน ไม่แปลแข็งทื่อแบบเครื่องแปล
-2. รักษาชื่อตัวละคร สรรพนาม (เช่น ฉัน/นาย/เธอ/ผม/คุณ/ข้า/เจ้า) และระดับภาษาให้สม่ำเสมอตลอดทั้งตอน
-3. กระชับคำให้พอดีกับกรอบคำพูดการ์ตูน ไม่เยิ่นเย้อ
-4. ปรับน้ำเสียงให้ตรงกับประเภทกรอบ (`type`):
-   - `normal`: บทพูดทั่วไป เป็นธรรมชาติ
-   - `shout`: ตะโกน / แอ็กชัน ดุดัน กระชับ มีพลัง
-   - `thought`: ความคิดในใจ
-   - `system`: กล่องระบบ/สเตตัสเกม ใช้สำนวนเกม RPG ภาษาไทย (เช่น เลเวล, สกิล, ภารกิจ, แจ้งเตือน)
-   - `narration`: ช่องบรรยาย ภาษาสละสลวย
-   - `terrible`: ข่มขู่ / ออร่ามืด
-   - `happy`: สดใส ร่าเริง
-   - `phone`: ข้อความแชท/โทรศัพท์
-   - `floating`: คำลอยนอกกรอบหรือเสียงเอฟเฟกต์ (แปลกระชับ)
-5. ห้ามใส่รหัสกรอบ เลขข้อ หรือแท็กประเภทเช่น [พูด] นำหน้าในค่า `thai`
-6. ส่งคืนเป็น JSON ตามสคีมาที่กำหนดเท่านั้น โดยต้องมีรายการครบทุก `id` ที่ส่งมา"""
+_SYSTEM_PROMPT = """แปลการ์ตูนและเว็บตูนเป็นภาษาไทยสำหรับอ่านในบอลลูน อ่านบทตามลำดับทั้งตอนก่อนเลือกสำนวน
+ให้ตัวละครพูดเหมือนคนไทยพูดกันจริง ถ่ายทอดเจตนาและอารมณ์แทนการเรียงคำตามต้นฉบับ
+เขียนให้สั้น อ่านออกเสียงแล้วเข้าปาก ตัดคำฟุ่มเฟือยโดยเก็บใจความ มุก และจังหวะหยุดของผู้พูด
+ใช้ “ครับ/ค่ะ/คะ” เฉพาะเมื่อความสัมพันธ์หรือสถานการณ์บ่งบอกว่าผู้พูดตั้งใจสุภาพ
+อย่าเติมท้ายทุกประโยค โดยเฉพาะตอนต่อสู้ ฉากแฟนตาซี ย้อนยุค หรือคุยกันเอง
+เลือกสรรพนามตามคู่สนทนา เช่น ข้า/เจ้า ฉัน/แก กู/มึง พี่/น้อง ละสรรพนามได้เมื่อคนไทยเข้าใจอยู่แล้ว
+รักษาการสะกดชื่อ คำเรียก และระดับภาษาของแต่ละคู่ให้ต่อเนื่อง เปลี่ยนได้เมื่อความสัมพันธ์หรือสถานการณ์เปลี่ยน
+ถ้ามี translation_note ให้ใช้เป็นคู่มือชื่อ แนวเรื่อง และน้ำเสียง หาก OCR ตกหล่นหรือเพี้ยนเล็กน้อย
+ให้ดูช่องก่อนหน้าและถัดไปเพื่อกู้ความหมายเฉพาะที่พออนุมานได้ อย่าแต่งเหตุการณ์หรือชื่อเฉพาะเพิ่ม
+
+เลือกน้ำเสียงตาม type ของกรอบ
+normal พูดตามธรรมชาติและความสัมพันธ์ของตัวละคร
+shout ใช้คำสั้น มีแรง สื่อความดุดันหรือตกใจตามฉาก
+thought ให้เหมือนความคิดที่ผุดขึ้นในใจ
+system ใช้ข้อความหน้าต่างเกมที่กระชับชัดเจน คงศัพท์สกิล สเตตัส ตัวเลข และหน่วย
+narration บรรยายให้สละสลวย เข้ากับจังหวะเรื่อง
+floating ใช้คำพึมพำ อุทาน หรือเสียงสั้นตามต้นฉบับ
+terrible ให้น้ำเสียงข่มขู่หรือกดดัน happy ให้สดใส phone ให้เหมือนบทแชทหรือคำพูดทางโทรศัพท์
+
+chapter_context ถ้ามี คือลำดับต้นฉบับทั้งตอนและคำแปลที่มีไว้เทียบสำนวน
+แปลเฉพาะ items คืน JSON ตามสคีมา ส่ง id ของแต่ละรายการตรงตัวครั้งเดียวให้ครบ ห้ามข้าม รวม หรือย้ายเนื้อหาข้าม ID
+ใน thai ใส่เฉพาะคำแปล ห้ามเติมเลขข้อ รหัส แท็กประเภทกรอบ หรือคำอธิบาย"""
 
 _RESPONSE_SCHEMA = {
     'type': 'OBJECT',
@@ -110,7 +115,8 @@ def _is_retryable_error(exc):
     ))
 
 
-def _call_gemini_batch(client, model, items, source_lang='ko+en', context_hint='', max_retries=3):
+def _call_gemini_batch(client, model, items, source_lang='ko+en', context_hint='', max_retries=3,
+                       translation_note: str = '', chapter_context=None):
     from google.genai import types
 
     payload = {
@@ -118,6 +124,10 @@ def _call_gemini_batch(client, model, items, source_lang='ko+en', context_hint='
         'target_language': 'th',
         'items': items,
     }
+    if translation_note.strip():
+        payload['translation_note'] = translation_note.strip()
+    if chapter_context:
+        payload['chapter_context'] = chapter_context
     if context_hint:
         payload['context'] = context_hint
     prompt = (
@@ -146,12 +156,15 @@ def _call_gemini_batch(client, model, items, source_lang='ko+en', context_hint='
                 raise ValueError('Gemini ไม่ส่งรายการ translations กลับมา')
             result = {}
             for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                bid = str(row.get('id') or '').strip()
-                thai = str(row.get('thai') or '').strip()
-                if bid and thai:
-                    result[bid] = thai
+                if not isinstance(row, dict) or not isinstance(row.get('id'), str):
+                    raise ValueError('Gemini ส่งรายการที่ไม่มีรหัสกรอบ')
+                bid = row['id']
+                thai = row.get('thai')
+                if bid in result or not isinstance(thai, str) or not thai.strip():
+                    raise ValueError('Gemini ส่งรหัสซ้ำหรือคำแปลว่าง')
+                result[bid] = thai.strip()
+            if set(result) != {item['id'] for item in items}:
+                raise ValueError('รหัสกรอบจาก Gemini ไม่ตรงกับรายการที่ส่งแปล')
             return result
         except Exception as exc:
             last_exc = exc
@@ -170,6 +183,7 @@ def translate_pages_with_gemini(
     context_hint='',
     max_batch_size=200,
     log=print,
+    translation_note: str = "",
 ):
     """Translate all bubbles across `pages` into Thai in a single google-genai pass.
 
@@ -177,14 +191,13 @@ def translate_pages_with_gemini(
     so Gemini sees the full chapter context.
     """
     model_name = (model or os.environ.get('GEMINI_MODEL') or DEFAULT_GEMINI_MODEL).strip()
+    chapter = []
     candidates = []
     bubble_by_id = {}
     for page_idx, page in enumerate(pages, 1):
         for b in page.bubbles:
             src = normalize(getattr(b, 'text', '') or '')
             if not src:
-                continue
-            if not overwrite and (getattr(b, 'translation', '') or '').strip():
                 continue
             ftype = (
                 getattr(b, 'frame_type', '')
@@ -193,13 +206,18 @@ def translate_pages_with_gemini(
             )
             if ftype not in FRAME_TYPE_LABELS:
                 ftype = 'normal'
-            candidates.append({
+            item = {
                 'id': b.id,
                 'page': page_idx,
                 'type': ftype,
                 'text': src,
-            })
+            }
+            if b.id in bubble_by_id:
+                raise ValueError('พบรหัสกรอบซ้ำในต้นฉบับ')
             bubble_by_id[b.id] = b
+            chapter.append(item)
+            if overwrite or not (getattr(b, 'translation', '') or '').strip():
+                candidates.append(item)
 
     if not candidates:
         return {
@@ -227,6 +245,7 @@ def translate_pages_with_gemini(
     )
 
     changes = {}
+    tags = {}
     batch_size = max(1, int(max_batch_size or 200))
     batches = [candidates[i:i + batch_size] for i in range(0, len(candidates), batch_size)]
     for batch_idx, batch in enumerate(batches, 1):
@@ -245,6 +264,11 @@ def translate_pages_with_gemini(
             batch,
             source_lang=source_lang,
             context_hint=context_hint,
+            translation_note=translation_note,
+            chapter_context=[
+                dict(item, thai=changes.get(item['id']) or getattr(bubble_by_id[item['id']], 'translation', ''))
+                for item in chapter
+            ] if len(batch) < len(chapter) else None,
         )
         for item in batch:
             bid = item['id']
@@ -252,11 +276,17 @@ def translate_pages_with_gemini(
             if not val:
                 continue
             tag, clean = extract_frame_tag(val)
-            b = bubble_by_id[bid]
-            b.translation = clean
-            if tag and not getattr(b, 'frame_type_locked', False):
-                b.frame_type = tag
+            if not clean.strip():
+                raise ValueError('Gemini ส่งเฉพาะแท็กโดยไม่มีคำแปล')
             changes[bid] = clean
+            if tag:
+                tags[bid] = tag
+
+    for bid, clean in changes.items():
+        bubble = bubble_by_id[bid]
+        bubble.translation = clean
+        if bid in tags and not getattr(bubble, 'frame_type_locked', False):
+            bubble.frame_type = tags[bid]
 
     missing = [item['id'] for item in candidates if item['id'] not in changes]
     if log:

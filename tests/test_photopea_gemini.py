@@ -65,6 +65,33 @@ class BackendAndWorkflowTests(unittest.TestCase):
 
 
 class GeminiSinglePassTranslatorTests(unittest.TestCase):
+    def test_notes_and_context_across_batches(self):
+        page = Page('p', [Bubble([0,0,30,30], id=str(i), text=f'line {i}') for i in range(3)])
+        page.bubbles[0].translation = 'คำเดิม'
+        prompts = []
+        def respond(**kwargs):
+            payload = json.loads(kwargs['contents'].split('\n',1)[1])
+            prompts.append(payload)
+            bid = payload['items'][0]['id']
+            return SimpleNamespace(text=json.dumps({'translations':[{'id':bid,'thai':'คำใหม่'}]}))
+        client = MagicMock()
+        client.models.generate_content.side_effect = respond
+        with patch('google.genai.Client', return_value=client):
+            gt.translate_pages_with_gemini([page], api_key='test', max_batch_size=1,
+                                           translation_note=' ใช้ข้า/เจ้า ', log=None)
+        self.assertEqual([p['translation_note'] for p in prompts], ['ใช้ข้า/เจ้า']*2)
+        self.assertEqual([r['id'] for r in prompts[0]['chapter_context']], ['0','1','2'])
+        self.assertEqual([r['thai'] for r in prompts[1]['chapter_context']], ['คำเดิม','คำใหม่',''])
+
+    def test_duplicate_result_id_rejected_before_applying(self):
+        page = Page('p', [Bubble([0,0,30,30], id='a', text='Run!')])
+        client = MagicMock()
+        row = {'id':'a','thai':'วิ่ง!'}
+        client.models.generate_content.return_value.text = json.dumps({'translations':[row,row]})
+        with patch('google.genai.Client', return_value=client), self.assertRaises(ValueError):
+            gt.translate_pages_with_gemini([page], api_key='test', log=None)
+        self.assertFalse(page.bubbles[0].translation)
+
     def test_single_pass_batch_translation_maps_all_pages_in_one_call(self):
         p1 = Page('01.png', [
             Bubble([10, 10, 120, 80], text='안녕하세요', id='b1', detected_frame_type='normal'),
