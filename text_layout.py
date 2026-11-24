@@ -325,7 +325,7 @@ def classify_bubble_type(image,bubble,gpu=False,*,refresh=False):
     if not refresh and getattr(bubble,'detected_frame_type','') in FRAME_TYPE_LABELS:
         return bubble.detected_frame_type
     prediction=_BUBBLE_TYPE_DETECTOR.match(image,bubble.box,gpu)
-    if prediction and (not refresh or prediction not in ('normal','floating','shout','thought')):
+    if prediction:
         return prediction
     speech=getattr(bubble,'detector_class',-1)==0
     texts=[(value or '').strip() for value in (bubble.text,bubble.translation)]
@@ -412,7 +412,6 @@ def classify_bubble_type(image,bubble,gpu=False,*,refresh=False):
         if spikes:return 'shout'
         if len(sectors)>=8 or (dot_count>=8 and len(dots)>=6):return 'thought'
         if rect:return 'narration'
-        if prediction:return prediction
     if spikes or len(sectors)>=8 or (re.search(r'!!|!\?|\?!|！！|！？|？！',joined) and heights and
             np.median(heights)>=max(28,image.width*.045,bh*.35)):return 'shout'
     if rect:return 'narration'
