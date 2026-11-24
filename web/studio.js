@@ -133,8 +133,10 @@ async function selectPage(i){
 }
 async function selectBubble(i){
  await flush();
- if(maskEdit && i!==id)await cancelMaskEdit(true);
- id=i;sidebar();inspect();bars();draw()
+ const switchMask=maskEdit && i!==id;
+ if(switchMask)await cancelMaskEdit(true);
+ id=i;sidebar();inspect();bars();draw();
+ if(switchMask)await startMaskEdit()
 }
 function sidebar(){
  $('pages').replaceChildren();pages.forEach((p,i)=>{let b=btn(String(i+1).padStart(2,'0')+'  '+p.name,()=>selectPage(i));let dot=el('i');dot.className='dot '+(p.bubbles.length&&p.bubbles.every(v=>v.translation)?'ready':p.clean?'cleaned':p.bubbles.length?'ocr':'');b.prepend(dot);b.classList.toggle('active',i===n);$('pages').append(b)});
@@ -200,6 +202,66 @@ function paintSegment(a,b,r,remove){
 }
 function fit(){if(page()){let vp=$('viewport');zoom=Math.min(1,(vp.clientWidth-28)/page().width,(vp.clientHeight-88)/page().height);zoom=Math.max(.025,zoom)}}
 function scale(value){zoom=Math.max(.025,Math.min(5,value));draw()}
+const maskBar=$('cleanPanel'), maskGrip=$('maskGrip'), maskViewport=$('viewport');
+let barFrame=0,barTarget='',barPin=null,barDrag=null,barTransitionTimer=0;
+
+function scheduleMaskBar(){
+ if(maskEdit&&!barFrame)barFrame=requestAnimationFrame(positionMaskBar)
+}
+
+function positionMaskBar(){
+ barFrame=0;
+ if(!maskEdit)return;
+ const target=JSON.stringify([key,n,id]);
+ const changed=target!==barTarget;
+ if(changed){barPin=null;barDrag=null}
+ // Read geometry together before writing a single transform. While dragging
+ // only pointer coordinates change, so reuse the bounds captured on press.
+ const vp=barDrag?.viewport||maskViewport.getBoundingClientRect();
+ const width=barDrag?.width??maskBar.offsetWidth,height=barDrag?.height??maskBar.offsetHeight;
+ const clamp=(v,min,max)=>Math.max(min,Math.min(v,max));
+ let x,y;
+ if(barPin){x=barPin.x;y=barPin.y}
+ else{
+  const anchor=$('overlay').querySelector('.bubble.selected')?.getBoundingClientRect();
+  if(!anchor)return;
+  x=(anchor.left+anchor.right-width)/2;
+  y=anchor.bottom+14;
+  if(y+height>vp.bottom-8 && anchor.top-14-height>=vp.top+8)y=anchor.top-14-height
+ }
+ x=clamp(x,barPin?8:vp.left+8,(barPin?innerWidth:vp.right)-width-8);
+ y=clamp(y,barPin?8:vp.top+8,(barPin?innerHeight:vp.bottom)-height-8);
+ if(changed&&barTarget){
+  maskBar.classList.add('reanchor');
+  clearTimeout(barTransitionTimer);
+  barTransitionTimer=setTimeout(()=>maskBar.classList.remove('reanchor'),180)
+ }
+ barTarget=target;
+ maskBar.style.transform='translate3d('+x+'px,'+y+'px,0)';
+ maskBar.classList.add('visible')
+}
+
+maskGrip.onpointerdown=e=>{
+ if(e.button!==0||!maskEdit)return;
+ const rect=maskBar.getBoundingClientRect(),viewport=maskViewport.getBoundingClientRect();
+ barDrag={id:e.pointerId,viewport,width:rect.width,height:rect.height,dx:e.clientX-rect.left,dy:e.clientY-rect.top};
+ barPin={x:rect.left,y:rect.top};
+ maskBar.classList.remove('reanchor');maskGrip.setPointerCapture(e.pointerId);e.preventDefault();
+ scheduleMaskBar()
+};
+maskGrip.onpointermove=e=>{
+ if(barDrag?.id!==e.pointerId)return;
+ barPin={x:e.clientX-barDrag.dx,y:e.clientY-barDrag.dy};
+ scheduleMaskBar()
+};
+maskGrip.onlostpointercapture=()=>{barDrag=null;scheduleMaskBar()};
+maskViewport.addEventListener('scroll',scheduleMaskBar,{passive:true});
+const maskBarResize=new ResizeObserver(entries=>{
+ for(const entry of entries)if(entry.target===maskViewport)maskBar.style.setProperty('--mask-canvas-width',entry.contentRect.width+'px');
+ scheduleMaskBar()
+});
+maskBarResize.observe(maskViewport);maskBarResize.observe(maskBar);
+
 function bars(){
  $('modes').replaceChildren();
  [['1 OCR','1','ocrOptions','ตั้งค่าภาษา/โมเดลแล้วรัน OCR ทุกหน้า'],['2 Mask','2','batchMask','สร้าง Mask ทุกหน้า'],['3 Clean','3','batchClean','รัน Clean (LaMa/Auto) ทุกหน้า']].forEach(([label,k,cmd,tip])=>{
@@ -210,7 +272,10 @@ function bars(){
   let b=btn(label,()=>{if(maskEdit){maskPreviewOn=false}view=v;image();draw();bars()});
   b.classList.toggle('active',!maskEdit&&view===v);$('views').append(b)
  }
- $('cleanPanel').hidden=!maskEdit;
+ $('maskOptions').hidden=!maskEdit;
+ $('cleanPanel').inert=!maskEdit;
+ if(!maskEdit)$('cleanPanel').classList.remove('visible');
+ scheduleMaskBar();
  if(maskEdit){
   $('maskTarget').textContent=bubbleCode(bubble());
   $('maskToggle').hidden=!hasMaskPreview;
@@ -395,6 +460,7 @@ function draw(){
    }
   }
  });
+ scheduleMaskBar();
  updateCoordInfo()
 }
 function fillSelect(node,values,v){node.replaceChildren(...values.map(x=>Array.isArray(x)?new Option(x[1],x[0]):new Option(x,x)));node.value=v}

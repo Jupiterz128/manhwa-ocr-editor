@@ -36,7 +36,7 @@ class BrushAndStyleTests(unittest.TestCase):
                         for scale in (1,1.25):
                             with self.subTest(scale=scale):
                                 key='pink'+str(scale)
-                                studio.save(key,key,[Page(str(path),[bubble])],{})
+                                studio.save(key,key,[Page(str(path),[bubble,Bubble([605,520,730,590],text='NEXT')])],{})
                                 ctx=browser.new_context(viewport=dict(width=round(1920/scale),height=round(1080/scale)),device_scale_factor=scale)
                                 tab=ctx.new_page()
                                 tab.add_init_script(f"localStorage.setItem('studio-project','{key}')")
@@ -49,6 +49,36 @@ class BrushAndStyleTests(unittest.TestCase):
                                 tab.locator('#percent').click()
                                 tab.keyboard.press('m')
                                 tab.wait_for_function("document.querySelector('#paint').dataset.ready==='yes'")
+                                bar=tab.locator('#cleanPanel')
+                                bar.wait_for(state='visible')
+                                pos=bar.bounding_box()
+                                frame=tab.locator('.bubble.selected').bounding_box()
+                                viewport=tab.locator('#viewport').bounding_box()
+                                self.assertAlmostEqual(pos['y'],frame['y']+frame['height']+14,delta=2)
+                                for axis,span in [('x','width'),('y','height')]:
+                                    self.assertGreaterEqual(pos[axis],viewport[axis])
+                                    self.assertLessEqual(pos[axis]+pos[span],viewport[axis]+viewport[span])
+                                grip=tab.locator('#maskGrip').bounding_box()
+                                tab.mouse.move(grip['x']+5,grip['y']+5)
+                                tab.mouse.down()
+                                fps=tab.evaluate("""() => new Promise(resolve=>{
+                                  let first,count=0;
+                                  function step(t){
+                                    first??=t;
+                                    maskGrip.dispatchEvent(new PointerEvent('pointermove',{
+                                      pointerId:barDrag.id,clientX:barDrag.viewport.left+30+count,
+                                      clientY:barDrag.viewport.bottom-80,buttons:1}));
+                                    if(++count===61)resolve(60000/(t-first));else requestAnimationFrame(step)
+                                  }
+                                  requestAnimationFrame(step)
+                                })""")
+                                tab.mouse.up()
+                                pinned=bar.bounding_box()
+                                self.assertGreater(abs(pinned['y']-pos['y']),20)
+                                print(f'Mask toolbar drag {scale*100:.0f}%: {fps:.1f} frames/s',flush=True)
+                                tab.locator('#eraser').click()
+                                self.assertIn('active',tab.locator('#eraser').get_attribute('class'))
+                                tab.locator('#brush').click()
                                 stage=tab.locator('#stage').bounding_box()
                                 tab.mouse.move(stage['x']+420,stage['y']+275)
                                 radius=int(tab.locator('#radius').input_value())
@@ -56,6 +86,7 @@ class BrushAndStyleTests(unittest.TestCase):
                                 tab.wait_for_function(f"Number(document.querySelector('#radius').value)>{radius}")
                                 self.assertTrue(tab.locator('#brushCursor').is_visible())
                                 tab.keyboard.down('Space');tab.mouse.down();tab.mouse.move(stage['x']+420,stage['y']+220);tab.mouse.up();tab.keyboard.up('Space')
+                                self.assertAlmostEqual(bar.bounding_box()['y'],pinned['y'],delta=1)
                                 self.assertGreater(tab.locator('#viewport').evaluate('e=>e.scrollTop'),0)
                                 stage=tab.locator('#stage').bounding_box()
                                 tab.mouse.move(stage['x']+450,stage['y']+275);tab.mouse.down()
@@ -78,6 +109,14 @@ class BrushAndStyleTests(unittest.TestCase):
                                 reg=studio.mask_sessions[key,0,bubble.id]['region']
                                 self.assertGreater(reg.box[2],470)
                                 self.assertEqual(reg.mask[275-reg.box[1],462-reg.box[0]],255)
+                                with tab.expect_response(lambda r:r.url.endswith('/mask_undo') and r.ok):
+                                    bar.locator('[data-cmd=maskUndo]').click()
+                                with tab.expect_response(lambda r:r.url.endswith('/mask_start') and r.ok):
+                                    tab.locator('#layers .layer-main').nth(1).click()
+                                bar.wait_for(state='visible')
+                                tab.wait_for_timeout(210)
+                                next_frame=tab.locator('.bubble.selected').bounding_box()
+                                self.assertAlmostEqual(bar.bounding_box()['y'],next_frame['y']+next_frame['height']+14,delta=2)
                                 tab.locator('[data-cmd=maskCancel]').click()
                                 tab.locator('#cleanPanel').wait_for(state='hidden')
                                 self.assertNotIn(bubble.id,studio.load(key)[1])
