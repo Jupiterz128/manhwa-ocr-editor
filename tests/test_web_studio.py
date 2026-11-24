@@ -10,11 +10,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 import web_api as studio
 import test_text_effects_io as fixtures
 from bubble_cleaner import decode_region
-from manhwa_ocr import Bubble, Page, read_mtp, write_mtp
+from manhwa_ocr import Bubble, Line, Page, read_mtp, write_mtp
 from text_layout import is_current
 
 
@@ -91,6 +91,10 @@ class StudioPersistenceTests(unittest.TestCase):
             self.assertEqual(len(added['page']['bubbles']), 2)
             self.assertEqual(added['page']['bubbles'][-1]['box'], [30, 30, 140, 110])
 
+            # Resize/move the newly created untranslated bubble via bubble_box
+            moved = studio.action('txtjob', 0, 'edit', {'id': new_id, 'bubble_box': [45, 50, 190, 145]})
+            self.assertEqual(moved['page']['bubbles'][-1]['box'], [45, 50, 190, 145])
+
             exp_id = studio.export_txt('txtjob', 'id_template')
             self.assertIn(b.id, exp_id['text'])
             self.assertEqual(exp_id['filename'], 'ep01_ocr.txt')
@@ -107,6 +111,51 @@ class StudioPersistenceTests(unittest.TestCase):
             self.assertEqual(len(deleted['page']['bubbles']), 1)
             self.assertEqual(deleted['page']['bubbles'][0]['id'], b.id)
 
+    def test_ocr_options_and_single_bubble_rapid_ocr(self):
+        im = Image.new('RGB', (400, 300), 'white')
+        b_existing = Bubble(box=[20, 20, 160, 100], text='KEEP ME', translation='เก็บไว้', score=0.98)
+        b_new = Bubble(box=[180, 120, 360, 220], text='', translation='', score=1.0)
+        calls = []
+
+        class FakeEngine:
+            name = 'RapidOCR (PP-OCRv5)'
+
+        class FakePipe:
+            def iter_engines(self):
+                yield FakeEngine()
+
+            def read(self, eng, crop, variant):
+                return [Line('HELLO!', [10, 12, 90, 42], 0.94, eng.name)]
+
+            def scan(self, image):
+                return [Bubble(box=[10, 10, 100, 80], text='SCANNED', score=0.95)]
+
+        def fake_reader(lang='ko+en', engine='auto', neural=True, type_scan=True):
+            calls.append((lang, engine, neural, type_scan))
+            return FakePipe()
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(studio, 'ROOT', Path(tmp)), patch.object(studio, 'reader', side_effect=fake_reader):
+            source = Path(tmp) / '01.png'
+            im.save(source)
+            studio.save('ocrjob', 'OCR', [Page(str(source), [b_existing, b_new])], {})
+
+            # Single-bubble RapidOCR updates ONLY b_new and preserves b_existing
+            res = studio.action('ocrjob', 0, 'ocr_bubble', {'id': b_new.id, 'lang': 'en'})
+            self.assertEqual(res['text'], 'HELLO!')
+            self.assertAlmostEqual(res['score'], 0.94, places=2)
+            self.assertEqual(calls[-1], ('en', 'rapid', False, False))
+            pages, _ = studio.load('ocrjob')
+            self.assertEqual(pages[0].bubbles[0].text, 'KEEP ME')
+            self.assertEqual(pages[0].bubbles[0].translation, 'เก็บไว้')
+            self.assertEqual(pages[0].bubbles[1].text, 'HELLO!')
+            self.assertEqual(len(pages[0].bubbles[1].lines), 1)
+
+            # Batch OCR passes chosen lang & engine
+            bres = studio.batch_action('ocrjob', 'ocr', {'replace': True, 'lang': 'zh+en', 'engine': 'paddle'})
+            self.assertEqual(calls[-1], ('zh+en', 'paddle', True, True))
+            self.assertIn('paddle', bres['note'])
+            self.assertIn('zh+en', bres['note'])
+
     def test_mask_edit_preview_cancel_and_apply(self):
         im = Image.new('RGB', (400, 300), '#9fb3c8')
         d = ImageDraw.Draw(im)
@@ -118,7 +167,6 @@ class StudioPersistenceTests(unittest.TestCase):
             im.save(source)
             studio.save('maskjob', 'Mask', [Page(str(source), [b])], {})
 
-            # Start session -> paint -> preview -> cancel (must NOT persist clean_patches or masks)
             studio.action('maskjob', 0, 'mask_start', {'id': b.id})
             studio.action('maskjob', 0, 'mask_paint', {'id': b.id, 'points': [[145, 150], [255, 150]], 'radius': 24, 'erase': False})
             prev = studio.action('maskjob', 0, 'mask_preview', {'id': b.id})
@@ -136,7 +184,6 @@ class StudioPersistenceTests(unittest.TestCase):
             self.assertEqual(pages_after_cancel[0].clean_patches, [])
             self.assertNotIn(b.id, masks_after_cancel)
 
-            # Start again -> paint -> undo -> paint -> preview -> apply (MUST persist)
             studio.action('maskjob', 0, 'mask_start', {'id': b.id})
             studio.action('maskjob', 0, 'mask_paint', {'id': b.id, 'points': [[145, 150], [255, 150]], 'radius': 24, 'erase': False})
             studio.action('maskjob', 0, 'mask_undo', {'id': b.id})
@@ -180,14 +227,20 @@ class StudioPersistenceTests(unittest.TestCase):
         from playwright.sync_api import sync_playwright
 
         im, b = fixtures.styled_fixture()
-        b_low = Bubble(box=[40, 320, 260, 430], text='LOW', translation='', score=0.72, lines=[])
-        b_untr = Bubble(box=[300, 320, 520, 430], text='WAIT', translation='', score=0.96, lines=[])
+        # Draw a crisp white bubble with clear English text in lower region for live RapidOCR single-bubble test
+        draw_im = im.copy()
+        dr = ImageDraw.Draw(draw_im)
+        dr.rectangle((35, 305, 315, 425), fill='white', outline='#111111', width=3)
+        fpath = 'C:/Windows/Fonts/arialbd.ttf'
+        font = ImageFont.truetype(fpath, 36) if Path(fpath).is_file() else ImageFont.load_default()
+        dr.text((90, 342), 'HELLO', font=font, fill='black')
+        b_untr = Bubble(box=[340, 310, 520, 420], text='WAIT', translation='', score=0.96, lines=[])
         with tempfile.TemporaryDirectory() as tmp, patch.object(studio, 'ROOT', Path(tmp) / 'store'):
             root = Path(tmp)
             path = root / 'page.png'
-            im.save(path)
+            draw_im.save(path)
             source = root / 'chapter.mtp'
-            write_mtp(source, [Page(str(path), [b, b_low, b_untr])], {}, threading.Event(), lambda _: None)
+            write_mtp(source, [Page(str(path), [b, b_untr])], {}, threading.Event(), lambda _: None)
             with socket.socket() as sock:
                 sock.bind(('127.0.0.1', 0))
                 server = uvicorn.Server(uvicorn.Config(studio.app, log_level='warning'))
@@ -231,25 +284,56 @@ class StudioPersistenceTests(unittest.TestCase):
                                     }"""
                                 )
                                 self.assertEqual(clipped, [], f'Clipped buttons at scale {ratio}: {clipped}')
+                                self.assertIn('Photopea Backend', tab.locator('footer').text_content())
+                                self.assertEqual(tab.locator('#bid').text_content(), 'B01')
+                                self.assertTrue(tab.locator('#frameBadge').is_visible())
+
+                                # Test OCR Options Modal (key '1') opens & remembers lang/engine in session
+                                tab.keyboard.press('1')
+                                tab.locator('#ocrLang').wait_for(state='visible')
+                                self.assertEqual(tab.locator('#ocrLang').input_value(), 'ko+en')
+                                self.assertEqual(tab.locator('#ocrEngine').input_value(), 'rapid')
+                                tab.locator('#ocrLang').select_option('en')
+                                tab.locator('#ocrEngine').select_option('paddle')
+                                tab.locator('#modal button', has_text='ยกเลิก').click()
+                                tab.keyboard.press('1')
+                                tab.locator('#ocrLang').wait_for(state='visible')
+                                self.assertEqual(tab.locator('#ocrLang').input_value(), 'en')
+                                self.assertEqual(tab.locator('#ocrEngine').input_value(), 'paddle')
+                                tab.locator('#ocrEngine').select_option('rapid')
+                                tab.locator('#modal button', has_text='ยกเลิก').click()
 
                                 # Verify view buttons (ต้นฉบับ / คลีน / Text), heatmap bubbles & badges
                                 self.assertEqual(tab.locator('#views button').all_text_contents(), ['ต้นฉบับ', 'คลีน', 'Text'])
-                                self.assertGreaterEqual(tab.locator('.bubble').count(), 3)
+                                self.assertGreaterEqual(tab.locator('.bubble').count(), 2)
                                 self.assertEqual(tab.locator('.bubble .badge').count(), tab.locator('.bubble').count())
 
-                                # Test Create Frame (+ กรอบ [N]) & Delete Frame (Del)
+                                # Draw new frame around 'HELLO' (x=35..315, y=305..425) -> auto V mode (8 handles!) -> resize -> RapidOCR single bubble -> delete
                                 count_before = tab.locator('.bubble').count()
                                 tab.keyboard.press('n')
                                 stage_bb = tab.locator('#stage').bounding_box()
-                                tab.mouse.move(stage_bb['x'] + 40, stage_bb['y'] + 40)
+                                z = stage_bb['width'] / draw_im.width
+                                tab.mouse.move(stage_bb['x'] + 40 * z, stage_bb['y'] + 310 * z)
                                 tab.mouse.down()
-                                tab.mouse.move(stage_bb['x'] + 120, stage_bb['y'] + 100, steps=4)
+                                tab.mouse.move(stage_bb['x'] + 280 * z, stage_bb['y'] + 410 * z, steps=5)
                                 tab.mouse.up()
                                 tab.wait_for_function(f"() => document.querySelectorAll('.bubble').length === {count_before + 1}")
+                                # Immediately enters Move [V] with 8 handles on the new frame
+                                self.assertEqual(tab.locator('.handle').count(), 8)
+                                se_new = tab.locator('[data-handle=se]').bounding_box()
+                                tab.mouse.move(se_new['x'] + 4, se_new['y'] + 4)
+                                tab.mouse.down()
+                                tab.mouse.move(se_new['x'] + 24, se_new['y'] + 12, steps=4)
+                                tab.mouse.up()
+                                tab.wait_for_timeout(450)
+                                # Click RapidOCR ช่องนี้ (real RapidOCR reads 'HELLO' only in this frame!)
+                                tab.locator('#inspector [data-cmd=rapidBubble]').click()
+                                tab.wait_for_function("() => document.getElementById('source').value.trim().length > 0", timeout=60000)
+                                self.assertIn('HELLO', tab.locator('#source').input_value().upper())
                                 tab.keyboard.press('Delete')
                                 tab.wait_for_function(f"() => document.querySelectorAll('.bubble').length === {count_before}")
 
-                                # Test TXT Modal (T): switch format & import
+                                # Test TXT Modal (T): switch format
                                 tab.keyboard.press('t')
                                 tab.locator('#txtArea').wait_for()
                                 tab.locator('#txtMode').select_option('numbered')
@@ -257,7 +341,7 @@ class StudioPersistenceTests(unittest.TestCase):
                                 self.assertIn('1.', tab.locator('#txtArea').input_value())
                                 tab.locator('#close').click()
 
-                                # Test Mask Edit Mode (M) -> paint -> Preview -> Cancel, then Preview -> ตกลง
+                                # Test Mask Edit Mode (M) -> paint -> Preview -> ตกลง
                                 tab.locator('#layers .layer button').first.click()
                                 tab.keyboard.press('m')
                                 tab.locator('#cleanPanel').wait_for(state='visible')

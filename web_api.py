@@ -19,12 +19,13 @@ import numpy as np
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageOps
 import uvicorn
 
 import manhwa_ocr as core
 from bubble_cleaner import Cleaner, compose_page, prepare_region, encode_region, decode_region, encode_patch
 from clean_quality import clean_checked
+from frame_geometry import map_points, ocr_crop, quad_bounds
 from text_layout import (
     FONT_CHOICES,
     detect_and_parse_translations,
@@ -37,11 +38,14 @@ from text_style_sampler import effects, sample_style
 
 ROOT = core.DATA_DIR / 'studio4'
 WEB = Path(__file__).with_name('web')
+VALID_OCR_LANGS = ('ko+en', 'en', 'zh+en', 'zh_tw+en')
+VALID_OCR_ENGINES = ('rapid', 'paddle', 'easy', 'auto')
 app = FastAPI(title='Manhwa OCR Editor 4.0', docs_url=None, redoc_url=None)
 lock = threading.RLock()
 cancel = threading.Event()
 jobs = {}
 mask_sessions = {}
+pipelines = {}
 pipeline = None
 cleaner_inst = None
 
@@ -236,7 +240,30 @@ def image(key: str, n: int, view: str = 'original', bid: str = ''):
     return Response(buf.getvalue(), media_type='image/png')
 
 
+def _clip_bubble_box(raw, im):
+    if not isinstance(raw, list) or len(raw) != 4:
+        raise ValueError('พิกัดกรอบไม่ถูกต้อง')
+    vals = [float(v) for v in raw]
+    if not all(map(math.isfinite, vals)):
+        raise ValueError('พิกัดกรอบไม่ถูกต้อง')
+    x0, x1 = sorted((vals[0], vals[2]))
+    y0, y1 = sorted((vals[1], vals[3]))
+    x0 = max(0, min(im.width - 1, int(round(x0))))
+    y0 = max(0, min(im.height - 1, int(round(y0))))
+    x1 = max(0, min(im.width, int(round(x1))))
+    y1 = max(0, min(im.height, int(round(y1))))
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        raise ValueError('กรอบเล็กเกินไป (ต้องกว้าง/สูงอย่างน้อย 8 px)')
+    return [x0, y0, x1, y1]
+
+
 def text_update(im, page, b, d):
+    if 'bubble_box' in d:
+        b.box = _clip_bubble_box(d['bubble_box'], im)
+        b.quad = []
+        if b.text_layer:
+            b.text_layer['bubble_box'] = list(b.box)
+            b.text_layer['bubble_quad'] = []
     for k in ('text', 'translation', 'frame_type', 'font_choice'):
         if k in d:
             setattr(b, k, d[k])
@@ -244,6 +271,10 @@ def text_update(im, page, b, d):
         b.frame_type_locked = True
     if not b.translation.strip():
         b.text_layer = {}
+        return
+    if 'bubble_box' in d and not any(
+        k in d for k in ('translation', 'font_choice', 'box', 'rotation', 'font_size', 'alignment', 'wrapped', 'color', 'hidden', 'style')
+    ):
         return
     previous = b.text_layer
     layer = previous
@@ -301,13 +332,63 @@ def text_update(im, page, b, d):
     b.text_layer = layer
 
 
-def reader():
+def reader(lang='ko+en', engine='auto', neural=True, type_scan=True):
     global pipeline
-    if pipeline is None:
-        pipeline = core.LocalPipeline(
-            core.OCRCache(), lang='ko+en', gpu=core._auto_gpu_default(), neural=True, type_scan=True, log=print
+    if lang not in VALID_OCR_LANGS:
+        raise ValueError(f'ไม่รองรับภาษา OCR: {lang}')
+    if engine not in VALID_OCR_ENGINES:
+        raise ValueError(f'ไม่รองรับโมเดล OCR: {engine}')
+    key = (engine, lang, bool(neural), bool(type_scan))
+    pipe = pipelines.get(key)
+    if pipe is None:
+        pipe = core.LocalPipeline(
+            core.OCRCache(),
+            mode=engine,
+            lang=lang,
+            gpu=core._auto_gpu_default(),
+            neural=bool(neural),
+            type_scan=bool(type_scan),
+            log=print,
         )
-    return pipeline
+        pipelines[key] = pipe
+    if key == ('auto', 'ko+en', True, True):
+        pipeline = pipe
+    return pipe
+
+
+def _ocr_single_bubble_rapid(im, b, lang='ko+en'):
+    crop, inv = ocr_crop(im, b, pad=8)
+    if min(crop.size) < 2:
+        raise ValueError('กรอบเล็กเกินไปสำหรับอ่าน OCR')
+    pipe = reader(lang=lang, engine='rapid', neural=False, type_scan=False)
+    eng = next(pipe.iter_engines())
+    best_lines = core.order_lines(pipe.read(eng, crop, 'original-crop'))
+    best_scale = 1.0
+    best_score = min((l.score for l in best_lines), default=0.0)
+    if not best_lines or best_score < 0.78:
+        factor = min(2.0, max(1.0, 1600 / max(crop.size)))
+        scaled = crop.resize(
+            (max(1, round(crop.width * factor)), max(1, round(crop.height * factor))),
+            Image.Resampling.LANCZOS,
+        )
+        contrast = ImageEnhance.Contrast(ImageOps.autocontrast(scaled.convert('L'))).enhance(1.35).convert('RGB')
+        alt_lines = core.order_lines(pipe.read(eng, contrast, 'contrast-2x'))
+        alt_score = min((l.score for l in alt_lines), default=0.0)
+        if alt_lines and (not best_lines or alt_score > best_score):
+            best_lines = alt_lines
+            best_scale = factor
+            best_score = alt_score
+    mapped = []
+    for l in best_lines:
+        x0, y0, x1, y1 = [v / best_scale for v in l.box]
+        pts = map_points([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], inv)
+        box = core.clip_box(quad_bounds(pts), im.width, im.height)
+        mapped.append({'text': l.text, 'box': box, 'score': float(l.score), 'engine': eng.name})
+    b.text = core.join_lines([l.text for l in best_lines])
+    b.score = float(best_score) if best_lines else 0.0
+    b.engine = eng.name
+    b.lines = mapped
+    return b.text, b.score
 
 
 def _make_verifier(reg):
@@ -389,9 +470,11 @@ def batch_action(key: str, action: str, d: dict):
         if action == 'ocr':
             if any(p.bubbles for p in pages) and not d.get('replace'):
                 raise ValueError('ยืนยันการอ่าน OCR ใหม่ทุกหน้าก่อน')
+            lang = d.get('lang', 'ko+en')
+            engine = d.get('engine', 'rapid')
             for k_sess in [k for k in mask_sessions if k[0] == key]:
                 mask_sessions.pop(k_sess, None)
-            pipe = reader()
+            pipe = reader(lang=lang, engine=engine, neural=True, type_scan=True)
             total = 0
             for p in pages:
                 for old in p.bubbles:
@@ -401,7 +484,7 @@ def batch_action(key: str, action: str, d: dict):
                 p.bubbles = pipe.scan(im)
                 p.clean_patches = []
                 total += len(p.bubbles)
-            note = f'OCR ทุกหน้าสำเร็จ {len(pages)} หน้า • {total} กรอบ'
+            note = f'OCR ({engine} · {lang}) สำเร็จ {len(pages)} หน้า • {total} กรอบ'
         elif action == 'mask':
             total = 0
             for p in pages:
@@ -452,21 +535,13 @@ def action(key: str, n: int, action: str, d: dict):
         extra_out = {}
         if action == 'edit' and b:
             text_update(im, p, b, d)
+            if 'bubble_box' in d:
+                masks.pop(b.id, None)
+                masks.pop('undo:' + b.id, None)
         elif action == 'add_bubble':
-            raw = d.get('box')
-            if not isinstance(raw, list) or len(raw) != 4:
-                raise ValueError('พิกัดกรอบใหม่ไม่ถูกต้อง')
-            x0, y0, x1, y1 = [float(v) for v in raw]
-            x0, x1 = sorted((x0, x1))
-            y0, y1 = sorted((y0, y1))
-            x0 = max(0, min(im.width - 1, int(round(x0))))
-            y0 = max(0, min(im.height - 1, int(round(y0))))
-            x1 = max(0, min(im.width, int(round(x1))))
-            y1 = max(0, min(im.height, int(round(y1))))
-            if x1 - x0 < 8 or y1 - y0 < 8:
-                raise ValueError('กรอบใหม่เล็กเกินไป (ต้องกว้าง/สูงอย่างน้อย 8 px)')
+            box = _clip_bubble_box(d.get('box'), im)
             new_b = core.Bubble(
-                box=[x0, y0, x1, y1],
+                box=box,
                 text='',
                 translation='',
                 lines=[],
@@ -476,7 +551,7 @@ def action(key: str, n: int, action: str, d: dict):
             )
             p.bubbles.append(new_b)
             extra_out['id'] = new_b.id
-            note = 'เพิ่มกรอบใหม่แล้ว'
+            note = 'เพิ่มกรอบใหม่แล้ว — ย้าย/ปรับขนาดได้ด้วย V หรือกด RapidOCR ช่องนี้'
         elif action == 'delete_bubble' and b:
             p.bubbles = [v for v in p.bubbles if v.id != b.id]
             p.clean_patches = [v for v in p.clean_patches if v.get('bubble_id') != b.id]
@@ -484,6 +559,12 @@ def action(key: str, n: int, action: str, d: dict):
             masks.pop('undo:' + b.id, None)
             mask_sessions.pop((key, n, b.id), None)
             note = 'ลบกรอบแล้ว'
+        elif action == 'ocr_bubble' and b:
+            lang = d.get('lang', 'ko+en')
+            txt, sc = _ocr_single_bubble_rapid(im, b, lang=lang)
+            extra_out['text'] = txt
+            extra_out['score'] = sc
+            note = f'RapidOCR ช่องนี้สำเร็จ ({round(sc * 100)}%)' if txt else 'RapidOCR ไม่พบข้อความในกรอบนี้'
         elif action == 'fx' and b and b.translation:
             text_update(
                 im, p, b, {'style': sample_style(im, compose_page(im, p.clean_patches) if p.clean_patches else None, b)}
@@ -491,11 +572,13 @@ def action(key: str, n: int, action: str, d: dict):
         elif action == 'ocr':
             if p.bubbles and not d.get('replace'):
                 raise ValueError('ยืนยันการอ่าน OCR ใหม่ก่อน')
+            lang = d.get('lang', 'ko+en')
+            engine = d.get('engine', 'auto')
             for old in p.bubbles:
                 masks.pop(old.id, None)
                 masks.pop('undo:' + old.id, None)
                 mask_sessions.pop((key, n, old.id), None)
-            p.bubbles = reader().scan(im)
+            p.bubbles = reader(lang=lang, engine=engine, neural=True, type_scan=True).scan(im)
             p.clean_patches = []
         elif action == 'translate':
             from gemini_translator import translate_pages_with_gemini
