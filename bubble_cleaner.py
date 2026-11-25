@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import io
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 import cv2
@@ -39,7 +40,7 @@ class LamaModel:
         if large_path.is_file() and not legacy:
             try:
                 from lama_large import load_generator
-                self.model = load_generator(large_path)
+                self.model = load_generator(large_path).float()
                 self.large = True
             except Exception as exc:
                 self.fallback_reason = f'โหลด LaMa Large ไม่สำเร็จ ใช้ Big-LaMa ({exc})'
@@ -97,12 +98,28 @@ class LamaModel:
             a=np.pad(a,((0,ph),(0,pw),(0,0)),mode=pad_mode)
             b=np.pad(b,((0,ph),(0,pw)),mode=pad_mode)
         t=self.torch
-        inp=t.from_numpy(a.transpose(2,0,1).copy()).unsqueeze(0).to(self.device)
-        m=t.from_numpy(b.copy()).unsqueeze(0).unsqueeze(0).to(self.device)
-        with t.inference_mode(), t.autocast('cuda', enabled=self.device.type=='cuda' and getattr(self,'large',False)):
-            out=self.model(inp,m).float()
-        pixels=out[0].permute(1,2,0).detach().cpu().numpy()[:rh,:rw]
-        if not np.all(np.isfinite(pixels)):raise RuntimeError('LaMa คืนค่าสีที่ไม่ถูกต้อง')
+        inp=t.from_numpy(a.transpose(2,0,1).copy()).unsqueeze(0).to(device=self.device,dtype=t.float32)
+        m=t.from_numpy(b.copy()).unsqueeze(0).unsqueeze(0).to(device=self.device,dtype=t.float32)
+        # Force float32 end-to-end: FFC FFT/Conv activations in lama_large_512px exceed fp16 range (65504) and NaN on CUDA.
+        with t.inference_mode(), t.autocast(device_type=self.device.type, enabled=False):
+            out=self.model(inp,m)
+        raw_dtype=str(getattr(out,'dtype',type(out).__name__))
+        pixels=out[0].permute(1,2,0).detach().to(dtype=t.float32).cpu().numpy()[:rh,:rw]
+        has_nan=bool(np.isnan(pixels).any())
+        has_inf=bool(np.isinf(pixels).any())
+        finite_pixels=pixels[np.isfinite(pixels)]
+        pmin=float(finite_pixels.min()) if finite_pixels.size else float('nan')
+        pmax=float(finite_pixels.max()) if finite_pixels.size else float('nan')
+        # lama_large_512px ends with Sigmoid() -> [0, 1]; big-lama.pt also outputs [0, 1].
+        if has_nan or has_inf or pixels.ndim!=3 or pixels.shape[2]!=3 or pmin<-1.0 or pmax>2.0:
+            print(
+                f'[LaMa] invalid output: large={getattr(self,"large",False)} '
+                f'device={self.device} dtype={raw_dtype} shape={pixels.shape} '
+                f'min={pmin} max={pmax} has_nan={has_nan} has_inf={has_inf}',
+                file=sys.stderr,
+                flush=True,
+            )
+            raise RuntimeError('LaMa คืนค่าสีที่ไม่ถูกต้อง')
         patch=np.clip(np.rint(pixels*255.0),0,255).astype(np.uint8)
         canvas=full_rgb.copy()
         if patch.shape[1::-1] != native_size:

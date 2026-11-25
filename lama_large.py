@@ -388,4 +388,4 @@ def load_generator(path):
                                downsample_conv_kwargs=local, resnet_conv_kwargs=spectral)
     state = torch.load(path, map_location='cpu', weights_only=True)
     model.load_state_dict(state['gen_state_dict'], strict=True)
-    return model.eval()
+    return model.float().eval()

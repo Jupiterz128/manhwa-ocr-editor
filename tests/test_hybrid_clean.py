@@ -83,6 +83,53 @@ class ModelSelectionTests(unittest.TestCase):
         self.assertGreater(int(out_arr[mask > 0, 0].mean()), 240)
         self.assertLess(int(out_arr[mask > 0, 1].mean()), 15)
 
+    def test_lama_large_forces_float32_and_logs_diagnostics_on_invalid_output(self):
+        im = Image.new('RGB', (123, 97), (140, 160, 180))
+        mask = np.zeros((97, 123), dtype=np.uint8)
+        mask[30:65, 40:85] = 255
+
+        obj = object.__new__(LamaModel)
+        obj.torch = torch
+        obj.device = torch.device('cpu')
+        obj.large = True
+        obj.fallback_reason = ''
+
+        seen = {}
+        def inspect_model(inp, m):
+            seen['inp_dtype'] = inp.dtype
+            seen['mask_dtype'] = m.dtype
+            seen['inp_min'] = float(inp.min())
+            seen['inp_max'] = float(inp.max())
+            seen['autocast_cpu'] = torch.is_autocast_cpu_enabled()
+            return inp.clone()
+
+        obj.model = inspect_model
+        with torch.autocast('cpu', dtype=torch.bfloat16, enabled=True):
+            out = obj(im, Image.fromarray(mask))
+        self.assertEqual(seen['inp_dtype'], torch.float32)
+        self.assertEqual(seen['mask_dtype'], torch.float32)
+        self.assertGreaterEqual(seen['inp_min'], 0.0)
+        self.assertLessEqual(seen['inp_max'], 1.0)
+        self.assertFalse(seen['autocast_cpu'])
+        self.assertEqual(out.size, im.size)
+
+        # Invalid NaN output must log min/max/dtype/has_nan to stderr and raise Thai RuntimeError
+        def nan_model(inp, m):
+            bad = inp.clone()
+            bad[0, 0, 0, 0] = float('nan')
+            return bad
+
+        obj.model = nan_model
+        buf = io.StringIO()
+        with patch('sys.stderr', buf):
+            with self.assertRaisesRegex(RuntimeError, 'LaMa คืนค่าสีที่ไม่ถูกต้อง'):
+                obj(im, Image.fromarray(mask))
+        logged = buf.getvalue()
+        self.assertIn('min=', logged)
+        self.assertIn('max=', logged)
+        self.assertIn('dtype=', logged)
+        self.assertIn('has_nan=True', logged)
+
 
 class DiffusionCleanerTests(unittest.TestCase):
     def _sample_region(self):
