@@ -190,6 +190,12 @@ class StudioPersistenceTests(unittest.TestCase):
             self.assertEqual(pages_mid[0].clean_patches, [])
             self.assertNotIn(b.id, masks_mid)
 
+            with patch('diffusion_cleaner.repair', side_effect=lambda reg, cleaner, im: (reg.image, reg.mask)):
+                diffusion = studio.action('maskjob', 0, 'mask_preview', {'id': b.id, 'engine':'diffusion'})
+            self.assertEqual(diffusion['method'], 'diffusion')
+            self.assertTrue(diffusion['has_preview'])
+            self.assertFalse(studio.load('maskjob')[0][0].clean_patches)
+
             studio.action('maskjob', 0, 'mask_cancel', {'id': b.id})
             self.assertNotIn(('maskjob', 0, b.id), studio.mask_sessions)
             pages_after_cancel, masks_after_cancel = studio.load('maskjob')
@@ -667,6 +673,28 @@ class StudioPersistenceTests(unittest.TestCase):
                                 tab.locator('#layers .layer button').first.click()
                                 tab.keyboard.press('m')
                                 tab.locator('#cleanPanel').wait_for(state='visible')
+                                repair_button = tab.locator('[data-cmd=diffusionRepair]')
+                                self.assertTrue(repair_button.is_visible())
+                                bar = tab.locator('#cleanPanel').bounding_box()
+                                self.assertGreaterEqual(bar['x'], 0)
+                                self.assertLessEqual(bar['x'] + bar['width'], vw)
+                                grip = tab.locator('#maskGrip').bounding_box()
+                                gx, gy = grip['x']+grip['width']/2, grip['y']+grip['height']/2
+                                tab.mouse.move(gx, gy)
+                                tab.mouse.down()
+                                tab.evaluate("""() => {
+                                    window.maskDragFrames = [];
+                                    function frame(t) {
+                                      window.maskDragFrames.push(t);
+                                      if (window.maskDragFrames.length < 40) requestAnimationFrame(frame);
+                                    }
+                                    requestAnimationFrame(frame);
+                                }""")
+                                tab.mouse.move(gx+56, gy+16, steps=45)
+                                tab.mouse.up()
+                                tab.wait_for_function('window.maskDragFrames.length >= 40')
+                                frames = tab.evaluate('window.maskDragFrames')
+                                print(f'Mask toolbar {ratio:.0%}: {39000/(frames[-1]-frames[0]):.1f} fps')
                                 sel_bb = tab.locator('.bubble.selected').bounding_box()
                                 tab.mouse.move(sel_bb['x'] + sel_bb['width'] * 0.3, sel_bb['y'] + sel_bb['height'] * 0.5)
                                 tab.mouse.down()

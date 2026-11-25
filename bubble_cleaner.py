@@ -20,26 +20,41 @@ def lama_model_path():
 
 
 class LamaModel:
-    """TorchScript LaMa with Snap-to-8 Dynamic ROI (96 px context) + Reflection Padding.
+    """Native large generator or legacy TorchScript with Snap-to-8 Dynamic ROI (96 px context) + Reflection Padding.
 
     Providing 96 px of clean surrounding structure lets Fast Fourier Convolutions
     continue hair strands, collar lines, window frames and wall tiles straight
     across removed lettering without pulling distant panel borders into the fill.
     """
-    def __init__(self):
+    def __init__(self, legacy=False):
         import torch
         path=lama_model_path()
-        if not path.is_file():
-            raise RuntimeError('ยังไม่มีโมเดล LaMa ให้รัน install_clean_lama_windows.bat หรือเลือก inpaint')
-        self.torch=torch
-        self.device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.fallback_reason=''
-        if self.device.type=='cpu':torch.set_num_threads(max(1,min(4,torch.get_num_threads())))
-        try:self.model=torch.jit.load(str(path),map_location=self.device).eval()
+        self.torch = torch
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.fallback_reason = ''
+        self.large = False
+        large_path = path.with_name('lama_large_512px.ckpt')
+        if self.device.type == 'cpu':
+            torch.set_num_threads(max(1, min(4, torch.get_num_threads())))
+        if large_path.is_file() and not legacy:
+            try:
+                from lama_large import load_generator
+                self.model = load_generator(large_path)
+                self.large = True
+            except Exception as exc:
+                self.fallback_reason = f'โหลด LaMa Large ไม่สำเร็จ ใช้ Big-LaMa ({exc})'
+        if not self.large:
+            if not path.is_file():
+                raise RuntimeError('ยังไม่มีโมเดล LaMa ให้รัน install_clean_lama_windows.bat หรือเลือก inpaint')
+            self.model = torch.jit.load(str(path), map_location='cpu').eval()
+        try:
+            self.model.to(self.device)
         except torch.cuda.OutOfMemoryError:
-            self.device=torch.device('cpu');self.fallback_reason='หน่วยความจำ GPU ไม่พอ ใช้ LaMa บน CPU ที่ความละเอียดเดิม'
-            torch.cuda.empty_cache();torch.set_num_threads(max(1,min(4,torch.get_num_threads())))
-            self.model=torch.jit.load(str(path),map_location=self.device).eval()
+            self.device = torch.device('cpu')
+            self.model.cpu()
+            torch.cuda.empty_cache()
+            torch.set_num_threads(max(1, min(4, torch.get_num_threads())))
+            self.fallback_reason = 'หน่วยความจำ GPU ไม่พอ ใช้ LaMa บน CPU ที่ความละเอียดเดิม'
 
     def __call__(self,image,mask):
         try:return self._predict(image,mask)
@@ -68,6 +83,12 @@ class LamaModel:
         crop_rgb=full_rgb[y0:y1,x0:x1]
         crop_m=full_mask[y0:y1,x0:x1]
         rh,rw=crop_rgb.shape[:2]
+        native_size = (rw, rh)
+        if getattr(self, 'large', False) and max(rh,rw)>512:
+            scale = 512/max(rh,rw)
+            rw,rh = max(16,round(rw*scale)),max(16,round(rh*scale))
+            crop_rgb=cv2.resize(crop_rgb,(rw,rh),interpolation=cv2.INTER_AREA)
+            crop_m=cv2.resize(crop_m.astype('float32'),(rw,rh),interpolation=cv2.INTER_AREA)>0
         ph,pw=(-rh)%8,(-rw)%8
         pad_mode='reflect' if (rh>ph and rw>pw and rh>=2 and rw>=2) else 'symmetric'
         a=crop_rgb.astype(np.float32)/255.0
@@ -78,12 +99,15 @@ class LamaModel:
         t=self.torch
         inp=t.from_numpy(a.transpose(2,0,1).copy()).unsqueeze(0).to(self.device)
         m=t.from_numpy(b.copy()).unsqueeze(0).unsqueeze(0).to(self.device)
-        with t.inference_mode():out=self.model(inp,m)
+        with t.inference_mode(), t.autocast('cuda', enabled=self.device.type=='cuda' and getattr(self,'large',False)):
+            out=self.model(inp,m).float()
         pixels=out[0].permute(1,2,0).detach().cpu().numpy()[:rh,:rw]
         if not np.all(np.isfinite(pixels)):raise RuntimeError('LaMa คืนค่าสีที่ไม่ถูกต้อง')
         patch=np.clip(np.rint(pixels*255.0),0,255).astype(np.uint8)
         canvas=full_rgb.copy()
-        canvas[y0:y1,x0:x1]=patch
+        if patch.shape[1::-1] != native_size:
+            patch=cv2.resize(patch,native_size,interpolation=cv2.INTER_CUBIC)
+        np.copyto(canvas[y0:y1,x0:x1],patch,where=full_mask[y0:y1,x0:x1,None])
         return Image.fromarray(canvas)
 
 
@@ -811,6 +835,8 @@ class Cleaner:
     def check_lama(self, force=False):
         """Explicit local load + inference check; never download or change packages."""
         path=lama_model_path()
+        large=path.with_name('lama_large_512px.ckpt')
+        if large.is_file():path=large
         try:
             stat=path.stat();signature=(str(path),stat.st_size,stat.st_mtime_ns)
         except OSError:
@@ -828,8 +854,10 @@ class Cleaner:
                 out=model(probe,mask)
                 if out.size!=probe.size:raise RuntimeError('ขนาดภาพทดสอบไม่ตรงกัน')
                 self.lama=model
+                active = path if getattr(model,'large', False) else lama_model_path()
+                status.update(path=str(active), bytes=active.stat().st_size)
                 status.update(ready=True,code='ready',device=str(model.device),
-                              message=f'LaMa: พร้อมใช้งาน ({model.device}) — ผ่านการโหลดและคลีนทดสอบ')
+                              message=f'LaMa: {active.name} พร้อมใช้งาน ({model.device}) {model.fallback_reason}'.strip())
             except Exception as exc:
                 status.update(code='load_or_inference_failed',
                               message='LaMa: โหลด/ทดสอบไม่สำเร็จ: '+str(exc))
@@ -881,7 +909,7 @@ class Cleaner:
             if ((variation<=3 and error<=3.5 and flat_error<=3) or white_interior) and not crossing_art:chosen='solid'
             elif surface is not None and error<=3.5 and not crossing_art:chosen='gradient'
             elif flat_context:chosen='solid'
-            elif self.lama is not None or lama_model_path().is_file():chosen='lama'
+            elif self.lama is not None or lama_model_path().is_file() or lama_model_path().with_name('lama_large_512px.ckpt').is_file():chosen='lama'
             else:raise RuntimeError('พื้นซับซ้อนและยังไม่มี LaMa: รัน install_clean_lama_windows.bat แล้วคลีนใหม่ หรือเลือกวิธีเอง; ไม่ใช้ inpaint แทนอัตโนมัติ')
         self.last_diagnostics['chosen_method']=chosen
         if chosen=='gradient' and surface is None:raise ValueError('พื้นที่พื้นสะอาดไม่พอสำหรับไล่เฉด ลอง LaMa หรือ inpaint')
@@ -893,18 +921,21 @@ class Cleaner:
         elif chosen=='inpaint':
             bgr=cv2.cvtColor(arr,cv2.COLOR_RGB2BGR)
             result=cv2.cvtColor(cv2.inpaint(bgr,mask,4,cv2.INPAINT_TELEA),cv2.COLOR_BGR2RGB)
-        elif chosen=='lama':
-            if self.lama is None:
+        elif chosen in ('lama','legacy_big_lama'):
+            if chosen=='legacy_big_lama':
+                predictor=LamaModel(legacy=True)
+            elif self.lama is None:
                 status=self.check_lama()
                 if not status['ready']:raise RuntimeError(status['message'])
+            if chosen!='legacy_big_lama':predictor=self.lama
             mys,mxs=np.nonzero(mask)
             active_span=max(int(mys.max()-mys.min())+1,int(mxs.max()-mxs.min())+1)+192
-            check_span=active_span if isinstance(self.lama,LamaModel) else max(region.image.size)
-            if check_span>2048:
+            check_span=active_span if isinstance(predictor,LamaModel) else max(region.image.size)
+            if check_span>2048 and not getattr(predictor,'large',False):
                 raise ValueError('LaMa รองรับกรอบด้านยาวไม่เกิน 2048 px ในรุ่นนี้ กรุณาเลือกกรอบเล็กลง')
-            result=np.asarray(self.lama(region.image,Image.fromarray(mask)).convert('RGB'))
-            self.last_diagnostics['lama_device']=str(getattr(self.lama,'device','unknown'))
-            self.last_diagnostics['lama_fallback']=getattr(self.lama,'fallback_reason','')
+            result=np.asarray(predictor(region.image,Image.fromarray(mask)).convert('RGB'))
+            self.last_diagnostics['lama_device']=str(getattr(predictor,'device','unknown'))
+            self.last_diagnostics['lama_fallback']=getattr(predictor,'fallback_reason','')
             if arr.shape[0]<=result.shape[0]<=arr.shape[0]+7 and arr.shape[1]<=result.shape[1]<=arr.shape[1]+7:
                 result=result[:arr.shape[0],:arr.shape[1]]
             if result.shape!=arr.shape:raise RuntimeError('LaMa คืนขนาดภาพไม่ตรงต้นฉบับ')

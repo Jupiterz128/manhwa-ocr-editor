@@ -169,6 +169,8 @@ small,p{color:var(--muted)}
 #cleanPanel.visible{visibility:visible;opacity:1;pointer-events:auto}
 #cleanPanel.reanchor{transition:transform 180ms cubic-bezier(0.22,1,0.36,1),opacity 140ms ease}
 #cleanPanel button{white-space:nowrap}
+#cleanPanel [data-cmd="diffusionRepair"]{background:rgba(139,92,246,.2);border-color:rgba(167,139,250,.42);color:#DDD6FE;font-weight:500}
+#cleanPanel [data-cmd="diffusionRepair"]:hover{background:rgba(139,92,246,.32);border-color:rgba(196,181,253,.65);color:#F5F3FF}
 #maskGrip{cursor:grab;touch-action:none;user-select:none;letter-spacing:-2px}
 #maskGrip:active{cursor:grabbing}
 #cleanPanel .brush-size{display:flex;align-items:center;gap:5px;margin:0;white-space:nowrap}

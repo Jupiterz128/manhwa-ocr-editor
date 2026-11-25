@@ -1385,10 +1385,13 @@ def action(key: str, n: int, action: str, d: dict):
             return dict(note='สร้างมาสก์ร่างใหม่แล้ว')
         elif action == 'mask_undo' and b:
             sess = _get_or_init_mask_session(key, n, im, b, masks)
+            had_preview = sess.get('preview_patch') is not None
+            sess['preview_patch'] = None
             if sess['undo']:
                 sess['region']=sess['undo'].pop()
-                sess['preview_patch'] = None
                 note = 'ย้อน Mask แล้ว'
+            elif had_preview:
+                note = 'ยกเลิกภาพ Preview แล้ว'
             else:
                 note = 'ไม่มีประวัติ Mask ให้ย้อน'
             return dict(page=summary(p), has_preview=False, note=note)
@@ -1396,6 +1399,12 @@ def action(key: str, n: int, action: str, d: dict):
             sess = _get_or_init_mask_session(key, n, im, b, masks)
             reg = sess['region']
             cleaner = get_cleaner()
+            if d.get('engine') == 'diffusion':
+                from diffusion_cleaner import repair
+                repaired, mask = repair(reg, cleaner, im)
+                sess['preview_patch'] = encode_patch(reg.box, repaired, mask, 'diffusion', b.id)
+                return dict(page=summary(p), has_preview=True, method='diffusion',
+                            note='AI วาดซ่อมเสร็จแล้ว กดตกลงเพื่อบันทึก')
             verify = None if reg.manual_edited else _make_verifier(reg)
             repaired, mask, method, quality = clean_checked(
                 cleaner, reg, method=d.get('method', 'auto'), color=d.get('color'), cancel=cancel, reader=verify

@@ -1,7 +1,7 @@
 """Download the publisher's LaMa weights once, then test the app's adapter."""
 import argparse
 import os
-from bubble_cleaner import LAMA_URL,lama_model_path,Cleaner
+from bubble_cleaner import lama_model_path,Cleaner
 
 
 def main():
@@ -18,14 +18,15 @@ def main():
     except ImportError:
         print('PyTorch is unavailable in this environment. Run install_windows.bat first.',flush=True)
         return 1
-    path=lama_model_path();path.parent.mkdir(parents=True,exist_ok=True)
+    path=lama_model_path().with_name('lama_large_512px.ckpt');path.parent.mkdir(parents=True,exist_ok=True)
     if not path.is_file() or args.redownload:
         temporary=path.with_suffix('.download')
         print('Downloading LaMa weights from the model publisher. This can take several minutes.',flush=True)
         try:
-            torch.hub.download_url_to_file(LAMA_URL,str(temporary),progress=True)
+            torch.hub.download_url_to_file('https://huggingface.co/dreMaz/AnimeMangaInpainting/resolve/main/lama_large_512px.ckpt',str(temporary),hash_prefix='11d30fbb3000fb2eceae318b75d9ced9229d99ae990a7f8b3ac35c8d31f2c935',progress=True)
             # Validate the checkpoint before it becomes the active model.
-            model=torch.jit.load(str(temporary),map_location='cpu').eval()
+            from lama_large import load_generator
+            model=load_generator(temporary)
             with torch.inference_mode():
                 mask=torch.zeros((1,1,64,64));mask[:,:,24:40,24:40]=1
                 output=model(torch.ones((1,3,64,64)),mask)

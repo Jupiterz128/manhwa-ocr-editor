@@ -1,0 +1,6 @@
+# Install with pip install --no-deps --target .venv/brushnet -r requirements-brushnet.txt
+diffusers @ https://github.com/TencentARC/BrushNet/archive/0f9d9e54ca85c40a11a8f0504b4b5b2e7e8fd14d.zip
+transformers==4.39.3
+tokenizers==0.15.2
+huggingface-hub==0.25.2
+accelerate==0.30.1

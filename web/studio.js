@@ -1949,7 +1949,7 @@ async function startMaskEdit(){
  if(strokeModalOpen)closeStrokeModal(false);
  if(!bubble()){info('เลือกกรอบข้อความก่อนแก้ Mask');return}
  await withBusy(async()=>{
-  samplingPixel=false;$('maskMethod').value='auto';prevView=view;prevMove=move;compareOriginal=false;move=false;drawFrame=false;maskEdit=true;maskPreviewOn=false;hasMaskPreview=false;
+  samplingPixel=false;$('maskMethod').value='lama';prevView=view;prevMove=move;compareOriginal=false;move=false;drawFrame=false;maskEdit=true;maskPreviewOn=false;hasMaskPreview=false;
   const res=await api(key+'/page/'+n+'/mask_start',{id});
   revision++;refresh();info(res.note)
  },'กำลังเปิดโหมดแก้ Mask…')
@@ -1971,14 +1971,28 @@ async function applyMaskEdit(){
   revision++;refresh();info(res.note)
  },'กำลังบันทึกผล Clean…')
 }
-async function previewMaskEdit(){
+async function previewMaskEdit(engine="lama"){
  await strokeWrites;
  if(!maskEdit||!bubble())return;
+ const isDiff=engine==='diffusion';
  await withBusy(async()=>{
-  const res=await api(key+'/page/'+n+'/mask_preview',{id,method:$('maskMethod').value,color:$('maskMethod').value==='solid'?triplet($('solidColor').value):null});
-  hasMaskPreview=!!res.has_preview;maskPreviewOn=hasMaskPreview;
-  revision++;bars();image();draw();info(res.note)
- },'กำลังประมวลผล Preview…')
+  const button=document.querySelector(isDiff?'[data-cmd="diffusionRepair"]':'[data-cmd="maskPreview"]');
+  const label=button?button.textContent:'';
+  if(button){
+   button.textContent=isDiff?'กำลังวาดซ่อม…':'กำลังประมวลผล…';
+   button.setAttribute('aria-busy','true');
+   button.classList.add('working');
+  }
+  try{
+   const res=await api(key+'/page/'+n+'/mask_preview',{id,engine,method:$('maskMethod').value,color:$('maskMethod').value==='solid'?triplet($('solidColor').value):null});
+   hasMaskPreview=!!res.has_preview;maskPreviewOn=hasMaskPreview;
+   revision++;bars();image();draw();info(res.note)
+  }finally{
+   if(button){
+    button.textContent=label;button.removeAttribute('aria-busy');button.classList.remove('working');
+   }
+  }
+ },isDiff?'กำลังวาดซ่อม AI · ครั้งแรกอาจใช้เวลาดาวน์โหลดโมเดล…':'กำลังประมวลผล Preview…')
 }
 async function undoMaskEdit(){
  await strokeWrites.catch(()=>{});strokeWrites=Promise.resolve();
@@ -2310,7 +2324,8 @@ const commands={
  newPreset:['เพิ่มโปรไฟล์ฟอนต์ใหม่',()=>openPresetEditor(true),''],
  maskEdit:['แก้ Mask รายช่อง (Ctrl+Wheel ปรับขนาดพู่กัน)',()=>maskEdit?cancelMaskEdit():startMaskEdit(),'M'],
  maskUndo:['ย้อน Mask',undoMaskEdit,''],
- maskPreview:['Preview Clean รายช่อง',previewMaskEdit,''],
+ diffusionRepair:['วาดซ่อมด้วย BrushNet',()=>previewMaskEdit('diffusion'),''],
+ maskPreview:['Preview Clean รายช่อง',()=>previewMaskEdit(),''],
  maskApply:['บันทึกผล Clean (ตกลง)',applyMaskEdit,''],
  maskCancel:['ยกเลิกแก้ Mask',()=>cancelMaskEdit(),'Esc'],
  txtModal:['ส่งออก / นำเข้าคำแปล TXT',openTxtModal,'T'],
