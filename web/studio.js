@@ -209,8 +209,10 @@ let samplingPixel=false,maskSerial=0, spaceHeld=false, cursorPoint=null, strokeW
 const cursor=el('div');cursor.id='brushCursor';document.body.append(cursor);
 function updateCursor(e){
  if(e)cursorPoint=[e.clientX,e.clientY];
- const vp=$('viewport'),pan=maskEdit&&spaceHeld;
- vp.classList.toggle('hand',pan);vp.classList.toggle('painting',maskEdit&&!pan&&!maskPreviewOn);
+ const vp=$('viewport'),pan=spaceHeld&&!!page();
+ vp.classList.toggle('hand',pan);
+ vp.classList.toggle('panning',pan&&drag?.kind==='pan');
+ vp.classList.toggle('painting',maskEdit&&!pan&&!maskPreviewOn);
  cursor.hidden=!maskEdit||pan||maskPreviewOn||!cursorPoint;
  if(cursor.hidden)return;
  const size=2*Number($('radius').value)*zoom;
@@ -377,8 +379,8 @@ function positionTextBar(){
   const anchor=$('overlay').querySelector('.bubble.selected')?.getBoundingClientRect();
   if(!anchor)return;
   x=(anchor.left+anchor.right-width)/2;
-  y=anchor.bottom+14;
-  if(y+height>vp.bottom-56&&anchor.top-14-height>=vp.top+52)y=anchor.top-14-height;
+  y=anchor.bottom+44;
+  if(y+height>vp.bottom-56&&anchor.top-44-height>=vp.top+52)y=anchor.top-44-height;
  }
  x=clamp(x,textBarPin?8:vp.left+8,(textBarPin?innerWidth:vp.right)-width-8);
  y=clamp(y,textBarPin?8:vp.top+8,(textBarPin?innerHeight:vp.bottom)-height-8);
@@ -1332,7 +1334,7 @@ function closeGradModal(commit){
  gradWinDrag=null;gradStopDrag=null;gradDialDrag=null;
  gradModal.inert=true;
  gradModal.classList.remove('visible');
- if(altHeld)scheduleLoupeUpdate();
+ if(altHeld)releaseAltEyedropper();else syncEyedropperUi();
  const b=bubble();
  if(!b){gradDraft=null;gradSnapshot=null;return}
  const l=b.text_layer||(b.text_layer={});
@@ -1521,7 +1523,7 @@ function closeStrokeModal(commit){
  strokeWinDrag=null;
  strokeModal.inert=true;
  strokeModal.classList.remove('visible');
- if(altHeld)scheduleLoupeUpdate();
+ if(altHeld)releaseAltEyedropper();else syncEyedropperUi();
  const b=bubble();
  if(!b){strokeDraft=null;strokeSnapshot=null;return}
  const l=b.text_layer||(b.text_layer={});
@@ -1625,11 +1627,15 @@ function sampleCanvasAt(clientX,clientY,clampToEdge=false){
  const rgbArr=[px[0],px[1],px[2]];
  return {rgb:rgbArr,hex:rgbToHexUpper(rgbArr),ix:fx,iy:fy,buf};
 }
+function isColorPickContext(){
+ return gradModalOpen||strokeModalOpen||eyedropMode==='button';
+}
 function isEyedropperActive(){
- return !maskEdit&&!busy&&!!page()&&!!bubble()&&(eyedropMode==='button'||altHeld);
+ return !maskEdit&&!spaceHeld&&!busy&&!!page()&&!!bubble()&&(eyedropMode==='button'||(altHeld&&isColorPickContext()));
 }
 function canUseAltEyedropper(targetNode){
- if(busy||maskEdit||!page()||!bubble()||$('dialog').open)return false;
+ if(busy||maskEdit||spaceHeld||!page()||!bubble()||$('dialog').open)return false;
+ if(!isColorPickContext())return false;
  if(targetNode&&targetNode.closest&&targetNode.closest('textarea,input[type=text],input[type=search],input[type=url]'))return false;
  return true;
 }
@@ -1863,6 +1869,14 @@ const point=e=>{let r=$('stage').getBoundingClientRect();return [(e.clientX-r.le
 $('viewport').onpointerdown=e=>{
  if(busy||!page())return;
  lastPointer={x:e.clientX,y:e.clientY};
+ if(spaceHeld&&e.button===0){
+  e.preventDefault();
+  e.stopPropagation();
+  drag={kind:'pan',p:[e.clientX,e.clientY],sx:$('viewport').scrollLeft,sy:$('viewport').scrollTop,viaSpace:true};
+  updateCursor(e);
+  $('viewport').setPointerCapture(e.pointerId);
+  return;
+ }
  if(e.altKey&&!altHeld&&canUseAltEyedropper(e.target)){
   altHeld=true;altPicked=false;altPickedTarget=null;altLastHex='';
   syncEyedropperUi();
@@ -1888,11 +1902,6 @@ $('viewport').onpointerdown=e=>{
   samplingPixel=false;
   run(async()=>{const result=await api(key+'/page/'+n+'/pick_color',{id,point:p});$('solidColor').value=rgb(result.color);$('maskMethod').value='solid';info('เลือกสีพื้น '+rgb(result.color))});return
  }
- if(maskEdit&&spaceHeld&&e.button===0){
-  updateCursor(e);
-  drag={kind:'pan',p:[e.clientX,e.clientY],sx:$('viewport').scrollLeft,sy:$('viewport').scrollTop};
-  $('viewport').setPointerCapture(e.pointerId);return
- }
  if(drawFrame){
   drag={kind:'draw',start:p,end:p};
   let c=$('paint');c.width=page().width;c.height=page().height;
@@ -1908,16 +1917,18 @@ $('viewport').onpointerdown=e=>{
   if(target.dataset.id!==id){run(()=>selectBubble(target.dataset.id));return}
   if(!move)return;
   let b=bubble(), before=captureTransform(b);
-  if(e.target.closest('.rot-zone')&&isTextTransform(b)){
+  const handleEl=e.target.closest('.handle');
+  if(!handleEl&&e.target.closest('.rot-zone')&&isTextTransform(b)){
    let rect=bounds(b), cx=(rect[0]+rect[2])/2, cy=(rect[1]+rect[3])/2;
    let startAngle=Math.atan2(p[1]-cy,p[0]-cx)*180/Math.PI;
    drag={kind:'rotate',cx,cy,startAngle,baseRot:layer().rotation||0,before};
    $('viewport').setPointerCapture(e.pointerId);return
   }
+  const hName=handleEl?.dataset.handle||'';
   if(isTextTransform(b)){
-   drag={kind:'moveText',handle:e.target.dataset.handle||'',p,rect:bounds(b),size:layer().font_size||24,before}
+   drag={kind:'moveText',handle:hName,p,rect:bounds(b),size:layer().font_size||24,before}
   }else{
-   drag={kind:'moveBox',handle:e.target.dataset.handle||'',p,rect:[...b.box],before}
+   drag={kind:'moveBox',handle:hName,p,rect:[...b.box],before}
   }
  }else drag={kind:'pan',p:[e.clientX,e.clientY],sx:$('viewport').scrollLeft,sy:$('viewport').scrollTop};
  $('viewport').setPointerCapture(e.pointerId)
@@ -1932,6 +1943,13 @@ $('viewport').onpointermove=e=>{
    if(eyedropDrag.mode==='alt'){altPicked=true;altPickedTarget=eyedropDrag.target;altLastHex=sample.hex}
   }
   scheduleLoupeUpdate();
+  return;
+ }
+ if(drag?.kind==='pan'){
+  cursorPoint=[e.clientX,e.clientY];
+  const v=$('viewport');
+  v.scrollLeft=drag.sx+drag.p[0]-e.clientX;
+  v.scrollTop=drag.sy+drag.p[1]-e.clientY;
   return;
  }
  updateCursor(e);if(!drag)return;let p=point(e);
@@ -1949,7 +1967,6 @@ $('viewport').onpointermove=e=>{
   }
   return
  }
- if(drag.kind==='pan'){let v=$('viewport');v.scrollLeft=drag.sx+drag.p[0]-e.clientX;v.scrollTop=drag.sy+drag.p[1]-e.clientY;return}
  if(textBar&&textBar.classList.contains('visible'))textBar.classList.add('dragging-hide');
  if(drag.kind==='rotate'){
   let cur=Math.atan2(p[1]-drag.cy,p[0]-drag.cx)*180/Math.PI;
@@ -2027,6 +2044,7 @@ $('viewport').onpointerup=e=>{
   return;
  }
  if(!drag)return;let d=drag;drag=null;
+ if(d.kind==='pan'){updateCursor();return}
  if(d.kind==='draw'){
   $('paint').width=1;
   let box=[Math.min(d.start[0],d.end[0]),Math.min(d.start[1],d.end[1]),Math.max(d.start[0],d.end[0]),Math.max(d.start[1],d.end[1])];
@@ -2066,17 +2084,23 @@ $('viewport').onpointerup=e=>{
 };
 $('viewport').onpointercancel=()=>{if(eyedropDrag){eyedropDrag=null;syncEyedropperUi();return}drag=null;textBar?.classList.remove('dragging-hide');$('paint').width=1;run(async()=>{if(key){pages=(await api(key+'/state')).pages;refresh()}})};
 $('viewport').addEventListener('wheel',e=>{
- if(!(e.ctrlKey||e.metaKey))return;
- e.preventDefault();
- e.stopPropagation();
- if(e.deltaY===0)return;
- if(maskEdit){
+ if(e.altKey&&!(e.ctrlKey||e.metaKey)){
+  e.preventDefault();
+  e.stopPropagation();
+  if(e.deltaY===0)return;
+  scale(zoom*(e.deltaY>0?.9:1.1),e.clientX,e.clientY);
+  if(maskEdit)updateCursor(e);
+  if(isEyedropperActive())scheduleLoupeUpdate();
+  return;
+ }
+ if(maskEdit&&(e.ctrlKey||e.metaKey)){
+  e.preventDefault();
+  e.stopPropagation();
+  if(e.deltaY===0)return;
   const r=$('radius');
   r.value=Math.min(+r.max,Math.max(+r.min,+r.value+(e.deltaY>0?-1:1)));
   r.oninput();
   updateCursor(e);
- }else{
-  scale(zoom*(e.deltaY>0?.9:1.1),e.clientX,e.clientY);
  }
 },{passive:false});
 function side(which){let node=$(which);node.hidden=!node.hidden;document.querySelector('main').style.setProperty('--'+which,node.hidden?'0px':which==='left'?'268px':'320px')}
@@ -2145,7 +2169,7 @@ const commands={
  applyPreset:['จัดฟอนต์ตามโปรไฟล์',applyFontPreset,''],
  editPreset:['ตั้งค่าฟอนต์โปรไฟล์',()=>openPresetEditor(false),''],
  newPreset:['เพิ่มโปรไฟล์ฟอนต์ใหม่',()=>openPresetEditor(true),''],
- maskEdit:['แก้ Mask รายช่อง',()=>maskEdit?cancelMaskEdit():startMaskEdit(),'M'],
+ maskEdit:['แก้ Mask รายช่อง (Ctrl+Wheel ปรับขนาดพู่กัน)',()=>maskEdit?cancelMaskEdit():startMaskEdit(),'M'],
  maskUndo:['ย้อน Mask',undoMaskEdit,''],
  maskPreview:['Preview Clean รายช่อง',previewMaskEdit,''],
  maskApply:['บันทึกผล Clean (ตกลง)',applyMaskEdit,''],
@@ -2159,6 +2183,11 @@ const commands={
  polish:['เกลาสำนวนกรอบนี้',()=>command('translate'),''],
  fx:['ดูดสี Auto fx',()=>command('fx'),''],
  reset:['ล้าง fx',()=>command('edit',false,{style:{}}),''],
+ zoomIn:['ซูมเข้าตามปลายเมาส์ (Zoom In)',()=>scale(zoom*1.2),'Alt+Wheel ↑'],
+ zoomOut:['ซูมออกตามปลายเมาส์ (Zoom Out)',()=>scale(zoom*.83),'Alt+Wheel ↓'],
+ panHand:['แพน / เลื่อนภาพ (Hand Tool · ใช้ได้ทุกโหมด)',()=>info('กด Spacebar ค้าง + คลิกซ้ายค้างลากเพื่อแพนภาพได้ในทุกโหมด'),'Space+Drag'],
+ eyedropText:['ดูดสีข้อความจากภาพ (Eyedropper)',()=>toggleButtonEyedropper('text'),''],
+ eyedropStroke:['ดูดสี Stroke จากภาพ (หรือ Alt+Click ในหน้าต่างสี)',()=>toggleButtonEyedropper('stroke'),'Alt+Click'],
  fit:['ซูมพอดีหน้า (Fit)',()=>{fit();draw()},'0'],
  compareOriginal:['เทียบภาพต้นฉบับ + Text (เปิด/ปิดตา)',toggleCompareOriginal,''],
  left:['ซ่อน/แสดงแถบซ้าย',()=>side('left'),'['],
@@ -2414,6 +2443,15 @@ document.addEventListener('pointermove',e=>{
 document.addEventListener('contextmenu',e=>{
  if(eyedropMode==='button'||eyedropDrag){e.preventDefault();cancelEyedropper()}
 });
+function isTypingField(node){
+ if(!node||!node.closest)return false;
+ if(node.isContentEditable)return true;
+ const field=node.closest('textarea,input');
+ if(!field)return false;
+ if(field.tagName==='TEXTAREA')return true;
+ const t=(field.type||'text').toLowerCase();
+ return !['button','checkbox','radio','range','color','file','submit','reset'].includes(t);
+}
 document.addEventListener('keydown',e=>{
  if((e.key==='Alt'||e.code==='AltLeft'||e.code==='AltRight')&&!e.ctrlKey&&!e.metaKey){
   if(!$('dialog').open)e.preventDefault();
@@ -2424,30 +2462,42 @@ document.addEventListener('keydown',e=>{
   }
   return;
  }
- if(maskEdit&&e.code==='Space'&&!e.target?.closest?.('textarea,input[type=text],select')){
- e.preventDefault();
- if(!spaceHeld&&drag?.kind==='maskPaint'&&cursorPoint){
-  $('viewport').onpointerup(e);
-  drag={kind:'pan',p:[...cursorPoint],sx:$('viewport').scrollLeft,sy:$('viewport').scrollTop}
+ if(e.code==='Space'&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&!$('dialog').open&&!!page()&&!isTypingField(e.target)){
+  e.preventDefault();
+  if(!spaceHeld){
+   if(maskEdit&&drag?.kind==='maskPaint'&&cursorPoint){
+    $('viewport').onpointerup(e);
+    drag={kind:'pan',p:[...cursorPoint],sx:$('viewport').scrollLeft,sy:$('viewport').scrollTop,viaSpace:true,fromMaskPaint:true};
+   }
+   spaceHeld=true;
+   if(eyedropLoupe)eyedropLoupe.hidden=true;
+   updateCursor();
+  }
+  return;
  }
- spaceHeld=true;updateCursor()
-}},true);
+},true);
 function releaseHand(resume){
+ if(!spaceHeld)return;
  spaceHeld=false;
- if(drag?.kind==='pan'&&maskEdit){
+ if(drag?.kind==='pan'&&drag.viaSpace){
+  const fromPaint=!!drag.fromMaskPaint;
   drag=null;
-  if(resume&&cursorPoint&&$('paint').dataset.ready==='yes'){
+  if(resume&&fromPaint&&maskEdit&&cursorPoint&&$('paint').dataset.ready==='yes'){
    let p=point({clientX:cursorPoint[0],clientY:cursorPoint[1]});
-   drag={kind:'maskPaint',points:[p],radius:+$('radius').value,erase}
+   drag={kind:'maskPaint',points:[p],radius:+$('radius').value,erase};
   }
  }
- updateCursor()
+ updateCursor();
+ if(isEyedropperActive())scheduleLoupeUpdate();
 }
 document.addEventListener('keyup',e=>{
  if(e.key==='Alt'||e.code==='AltLeft'||e.code==='AltRight'){
   if(!$('dialog').open)e.preventDefault();
   releaseAltEyedropper();
  }
- if(e.code==='Space')releaseHand(true);
+ if(e.code==='Space'){
+  if(spaceHeld)e.preventDefault();
+  releaseHand(true);
+ }
 });
 window.addEventListener('blur',()=>{releaseHand(false);releaseAltEyedropper();if(eyedropDrag){eyedropDrag=null;syncEyedropperUi()}});

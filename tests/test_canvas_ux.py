@@ -20,11 +20,19 @@ class CanvasUXStaticTests(unittest.TestCase):
         js = (root / 'studio.js').read_text(encoding='utf-8')
         css = (root / 'studio.css').read_text(encoding='utf-8')
 
-        # 1. Non-passive wheel listener with preventDefault + stopPropagation
+        # 1. Non-passive wheel listener with Alt+Wheel zoom & Ctrl+Wheel mask brush + Spacebar Hand Tool
         self.assertIn("addEventListener('wheel'", js)
         self.assertIn('{passive:false}', js)
+        self.assertIn('e.altKey', js)
         self.assertIn('e.preventDefault()', js)
         self.assertIn('e.stopPropagation()', js)
+        self.assertIn('isColorPickContext', js)
+        self.assertIn('Alt+Wheel', js)
+        self.assertIn('Space+Drag', js)
+        self.assertIn('Alt + ล้อเมาส์', html)
+        self.assertIn('.handle{position:absolute;width:14px;height:14px;', css)
+        self.assertIn('.rot-zone[data-rot=nw]{left:-38px;top:-38px}', css)
+        self.assertIn('#viewport.hand,#viewport.hand *{cursor:grab!important}', css)
 
         # 2. Contextual Task Bar mounted once in exact order: grip, font, color, align, size
         bar_idx = html.index('id="textBar"')
@@ -113,7 +121,7 @@ class CanvasUXBrowserTests(unittest.TestCase):
                         tab.goto(f'http://127.0.0.1:{sock.getsockname()[1]}')
                         tab.locator('#bid').wait_for()
 
-                        # === TEST 1: Ctrl + Wheel Zoom-to-Cursor on tall 720x10000 image ===
+                        # === TEST 1: Alt + Wheel Zoom-to-Cursor on tall 720x10000 image (and Alt in normal mode NEVER shows eyedropper!) ===
                         tab.locator('#percent').click()  # 100% zoom -> 720x10000 scrollable
                         tab.evaluate('document.getElementById("viewport").scrollTop = 4500')
                         vp_box = tab.locator('#viewport').bounding_box()
@@ -137,46 +145,52 @@ class CanvasUXBrowserTests(unittest.TestCase):
                             )
 
                         before_pt = img_point_under_cursor()
-                        tab.keyboard.down('Control')
+                        tab.keyboard.down('Alt')
+                        tab.wait_for_timeout(40)
+                        self.assertFalse(tab.locator('#eyedropLoupe').is_visible(), 'Alt in normal mode must NOT show eyedropper loupe')
+                        self.assertNotIn('eyedropper', tab.locator('#viewport').get_attribute('class') or '')
                         for _ in range(4):
                             tab.mouse.wheel(0, -120)
-                        tab.keyboard.up('Control')
+                        tab.keyboard.up('Alt')
                         after_in = img_point_under_cursor()
                         self.assertGreater(after_in['z'], before_pt['z'] * 1.25)
                         self.assertLessEqual(abs(after_in['y'] - before_pt['y']), 2.0, f'Zoom-in drifted Y: {before_pt} -> {after_in}')
 
                         # Zoom further until wider than viewport (horizontal scrolling active) -> both X and Y stay pinned
-                        tab.keyboard.down('Control')
+                        tab.keyboard.down('Alt')
                         for _ in range(5):
                             tab.mouse.wheel(0, -120)
-                        tab.keyboard.up('Control')
+                        tab.keyboard.up('Alt')
                         wide_before = img_point_under_cursor()
-                        tab.keyboard.down('Control')
+                        tab.keyboard.down('Alt')
                         for _ in range(3):
                             tab.mouse.wheel(0, -120)
-                        tab.keyboard.up('Control')
+                        tab.keyboard.up('Alt')
                         wide_after = img_point_under_cursor()
                         self.assertGreater(wide_after['z'], wide_before['z'] * 1.2)
                         self.assertLessEqual(abs(wide_after['x'] - wide_before['x']), 2.0, f'Wide zoom-in drifted X: {wide_before} -> {wide_after}')
                         self.assertLessEqual(abs(wide_after['y'] - wide_before['y']), 2.0, f'Wide zoom-in drifted Y: {wide_before} -> {wide_after}')
 
-                        # Zoom back out with Ctrl+Wheel and verify cursor Y stays pinned (no jump to top)
-                        tab.keyboard.down('Control')
+                        # Zoom back out with Alt+Wheel and verify cursor Y stays pinned (no jump to top)
+                        tab.keyboard.down('Alt')
                         for _ in range(14):
                             tab.mouse.wheel(0, 120)
-                        tab.keyboard.up('Control')
+                        tab.keyboard.up('Alt')
                         after_out = img_point_under_cursor()
                         self.assertLess(after_out['z'], before_pt['z'])
                         self.assertLessEqual(abs(after_out['y'] - before_pt['y']), 3.0, f'Zoom-out drifted Y: {before_pt} -> {after_out}')
                         self.assertGreater(after_out['scrollTop'], 2000)
 
-                        # Test Fit shortcut '0' and Command Palette Ctrl+K
+                        # Test Fit shortcut '0' and Command Palette Ctrl+K (with updated Alt+Wheel & Space+Drag shortcuts)
                         tab.keyboard.press('0')
                         fit_pct = tab.locator('#percent').inner_text()
                         self.assertNotEqual(fit_pct, '100%')
                         tab.keyboard.press('Control+k')
                         tab.locator('#modal .pal-item').first.wait_for(state='visible')
-                        self.assertIn('Fit', tab.locator('#modal').inner_text())
+                        pal_txt = tab.locator('#modal').inner_text()
+                        self.assertIn('Fit', pal_txt)
+                        self.assertIn('Alt+Wheel', pal_txt)
+                        self.assertIn('Space+Drag', pal_txt)
                         tab.locator('#close').click()
 
                         # === TEST 2: Contextual Task Bar in Text + Move (V) mode ===
@@ -202,10 +216,10 @@ class CanvasUXBrowserTests(unittest.TestCase):
                         self.assertEqual(xs, sorted(xs), f'Task bar controls out of order: {order}')
                         self.assertTrue(all(item['w'] > 0 for item in order), f'Zero-width control: {order}')
 
-                        # Verify positioned ~14px below selected bubble and inside viewport
+                        # Verify positioned ~44px below selected bubble (clearing lower rotate zones) and inside viewport
                         bar_bb = text_bar.bounding_box()
                         sel_bb = tab.locator('.bubble.selected').bounding_box()
-                        self.assertAlmostEqual(bar_bb['y'], sel_bb['y'] + sel_bb['height'] + 14, delta=3)
+                        self.assertAlmostEqual(bar_bb['y'], sel_bb['y'] + sel_bb['height'] + 44, delta=3)
                         self.assertGreaterEqual(bar_bb['x'], vp_box['x'])
                         self.assertLessEqual(bar_bb['x'] + bar_bb['width'], vp_box['x'] + vp_box['width'])
 
@@ -306,9 +320,109 @@ class CanvasUXBrowserTests(unittest.TestCase):
                         self.assertEqual(after_drag_opacity, '1')
                         new_sel_bb = tab.locator('.bubble.selected').bounding_box()
                         new_bar_bb = text_bar.bounding_box()
-                        self.assertAlmostEqual(new_bar_bb['y'], new_sel_bb['y'] + new_sel_bb['height'] + 14, delta=3)
+                        self.assertAlmostEqual(new_bar_bb['y'], new_sel_bb['y'] + new_sel_bb['height'] + 44, delta=3)
 
-                        # Verify Mask Edit (M) hides Text Bar, Ctrl+Wheel adjusts brush radius, and cancelling M restores Text Bar!
+                        # === TEST 2B: Corner Handle vs Rotate Zone Safety Spacing in Move (V) Mode ===
+                        geom_check = tab.evaluate(
+                            """() => {
+                              const b = document.querySelector('.bubble.selected');
+                              const results = {};
+                              for (const corner of ['nw', 'ne', 'se', 'sw']) {
+                                const h = b.querySelector(`.handle[data-handle="${corner}"]`);
+                                const r = b.querySelector(`.rot-zone[data-rot="${corner}"]`);
+                                const hr = h.getBoundingClientRect();
+                                const rr = r.getBoundingClientRect();
+                                const hz = parseInt(getComputedStyle(h).zIndex, 10);
+                                const rz = parseInt(getComputedStyle(r).zIndex, 10);
+                                const overlapX = Math.min(hr.right, rr.right) - Math.max(hr.left, rr.left);
+                                const overlapY = Math.min(hr.bottom, rr.bottom) - Math.max(hr.top, rr.top);
+                                const gapX = corner.includes('w') ? hr.left - rr.right : rr.left - hr.right;
+                                const gapY = corner.includes('n') ? hr.top - rr.bottom : rr.top - hr.bottom;
+                                const hitHandle = document.elementFromPoint(hr.left + hr.width / 2, hr.top + hr.height / 2);
+                                const moatX = corner.includes('w') ? hr.left - 6 : hr.right + 6;
+                                const moatY = corner.includes('n') ? hr.top - 6 : hr.bottom + 6;
+                                const hitMoat = document.elementFromPoint(moatX, moatY);
+                                const hitRot = document.elementFromPoint(rr.left + rr.width / 2, rr.top + rr.height / 2);
+                                results[corner] = {
+                                  hw: hr.width, hh: hr.height,
+                                  hz, rz,
+                                  overlaps: overlapX > 0 && overlapY > 0,
+                                  gapX, gapY,
+                                  handleTarget: hitHandle === h,
+                                  handleCursor: getComputedStyle(h).cursor,
+                                  moatIsRot: !!hitMoat?.closest?.('.rot-zone'),
+                                  rotTarget: hitRot === r,
+                                  rotCursor: getComputedStyle(r).cursor,
+                                };
+                              }
+                              return results;
+                            }"""
+                        )
+                        for corner, info in geom_check.items():
+                            self.assertGreaterEqual(info['hw'], 13.5, f'{corner} handle too small: {info}')
+                            self.assertGreaterEqual(info['hh'], 13.5, f'{corner} handle too small: {info}')
+                            self.assertGreater(info['hz'], info['rz'], f'{corner} handle z-index must exceed rot-zone: {info}')
+                            self.assertFalse(info['overlaps'], f'{corner} rot-zone overlaps handle: {info}')
+                            self.assertGreaterEqual(info['gapX'], 12.0, f'{corner} rot-zone X gap < 12px: {info}')
+                            self.assertGreaterEqual(info['gapY'], 12.0, f'{corner} rot-zone Y gap < 12px: {info}')
+                            self.assertTrue(info['handleTarget'], f'{corner} handle center not hit: {info}')
+                            self.assertIn('resize', info['handleCursor'])
+                            self.assertFalse(info['moatIsRot'], f'{corner} 6px safety moat must NOT trigger rotate: {info}')
+                            self.assertTrue(info['rotTarget'], f'{corner} rot-zone center not hit: {info}')
+                            self.assertIn('data:image/svg+xml', info['rotCursor'])
+
+                        # === TEST 2C: Spacebar + Left-Click Drag (Hand Tool) in Move (V) mode at 60fps ===
+                        tab.evaluate('document.getElementById("viewport").scrollTop = 80')
+                        sel_before_pan = tab.locator('.bubble.selected').bounding_box()
+                        sel_left_before = tab.locator('.bubble.selected').evaluate('e => e.style.left')
+                        sel_top_before = tab.locator('.bubble.selected').evaluate('e => e.style.top')
+                        px_pan = sel_before_pan['x'] + sel_before_pan['width'] / 2
+                        py_pan = sel_before_pan['y'] + sel_before_pan['height'] / 2
+                        tab.mouse.move(px_pan, py_pan)
+                        tab.keyboard.down('Space')
+                        tab.wait_for_timeout(30)
+                        self.assertIn('hand', tab.locator('#viewport').get_attribute('class') or '')
+                        self.assertEqual(tab.locator('.bubble.selected').evaluate('e => getComputedStyle(e).cursor'), 'grab')
+                        self.assertEqual(tab.locator('.handle').first.evaluate('e => getComputedStyle(e).cursor'), 'grab')
+                        tab.mouse.down()
+                        self.assertIn('panning', tab.locator('#viewport').get_attribute('class') or '')
+                        self.assertEqual(tab.locator('.bubble.selected').evaluate('e => getComputedStyle(e).cursor'), 'grabbing')
+                        pan_fps = tab.evaluate(
+                            """([sx, sy]) => new Promise(resolve => {
+                              const vp = document.getElementById('viewport');
+                              let first = 0, count = 0;
+                              function step(t) {
+                                first ||= t;
+                                vp.dispatchEvent(new PointerEvent('pointermove', {
+                                  clientX: sx, clientY: sy - count * 4, buttons: 1, bubbles: true
+                                }));
+                                if (++count === 61) resolve(60000 / (t - first));
+                                else requestAnimationFrame(step);
+                              }
+                              requestAnimationFrame(step);
+                            })""",
+                            [px_pan, py_pan],
+                        )
+                        tab.mouse.up()
+                        tab.keyboard.up('Space')
+                        self.assertNotIn('hand', tab.locator('#viewport').get_attribute('class') or '')
+                        self.assertGreater(tab.evaluate('document.getElementById("viewport").scrollTop'), 260)
+                        # Bubble itself was NOT dragged while panning with Spacebar!
+                        self.assertEqual(tab.locator('.bubble.selected').evaluate('e => e.style.left'), sel_left_before)
+                        self.assertEqual(tab.locator('.bubble.selected').evaluate('e => e.style.top'), sel_top_before)
+
+                        # Verify Spacebar inside <textarea> still types space normally without triggering Hand Tool
+                        tab.locator('#thai').click()
+                        thai_before = tab.locator('#thai').input_value()
+                        tab.keyboard.press('Space')
+                        self.assertNotIn('hand', tab.locator('#viewport').get_attribute('class') or '')
+                        self.assertEqual(len(tab.locator('#thai').input_value()), len(thai_before) + 1)
+                        tab.locator('#thai').fill(thai_before)
+                        tab.locator('#thai').blur()
+                        tab.evaluate('document.getElementById("viewport").scrollTop = 0')
+                        tab.wait_for_timeout(40)
+
+                        # Verify Mask Edit (M) hides Text Bar, Ctrl+Wheel adjusts brush radius, Alt+Wheel zooms, Space+Drag pans, and Esc restores Text Bar!
                         tab.keyboard.press('m')
                         tab.locator('#cleanPanel').wait_for(state='visible')
                         tab.wait_for_function("document.querySelector('#paint').dataset.ready==='yes'")
@@ -319,8 +433,26 @@ class CanvasUXBrowserTests(unittest.TestCase):
                         tab.keyboard.down('Control')
                         tab.mouse.wheel(0, -100)
                         tab.keyboard.up('Control')
-                        self.assertGreater(int(tab.locator('#radius').input_value()), rad0)
+                        rad1 = int(tab.locator('#radius').input_value())
+                        self.assertGreater(rad1, rad0)
                         self.assertEqual(tab.locator('#percent').inner_text(), z_mask_before)
+                        # Alt+Wheel in Mask Edit (M) zooms without altering brush radius!
+                        tab.keyboard.down('Alt')
+                        tab.mouse.wheel(0, -120)
+                        tab.mouse.wheel(0, -120)
+                        tab.keyboard.up('Alt')
+                        self.assertEqual(int(tab.locator('#radius').input_value()), rad1)
+                        self.assertNotEqual(tab.locator('#percent').inner_text(), z_mask_before)
+                        # Space+Drag in Mask Edit (M) pans smoothly without painting!
+                        scroll_m0 = tab.evaluate('document.getElementById("viewport").scrollTop')
+                        tab.mouse.move(vp_box['x'] + 320, vp_box['y'] + 340)
+                        tab.keyboard.down('Space')
+                        self.assertIn('hand', tab.locator('#viewport').get_attribute('class') or '')
+                        tab.mouse.down()
+                        tab.mouse.move(vp_box['x'] + 320, vp_box['y'] + 200, steps=5)
+                        tab.mouse.up()
+                        tab.keyboard.up('Space')
+                        self.assertGreater(tab.evaluate('document.getElementById("viewport").scrollTop'), scroll_m0 + 60)
                         tab.keyboard.press('Escape')
                         tab.locator('#cleanPanel').wait_for(state='hidden')
                         text_bar.wait_for(state='visible')
@@ -357,7 +489,7 @@ class CanvasUXBrowserTests(unittest.TestCase):
                         self.assertNotIn('compare-mode', tab.locator('#overlay').get_attribute('class'))
                         self.assertTrue(tab.locator('.bubble.selected .handle').first.is_visible())
                         text_bar.wait_for(state='visible')
-                        print(f'Canvas UX verified: switch avg={switch_stats["avgMs"]:.2f}ms, eye toggle={toggle_ms:.1f}ms', flush=True)
+                        print(f'Canvas UX verified: switch avg={switch_stats["avgMs"]:.2f}ms, pan={pan_fps:.1f}fps, eye toggle={toggle_ms:.1f}ms', flush=True)
 
                         self.assertEqual(errors, [], f'Browser JS errors: {errors}')
                         ctx.close()

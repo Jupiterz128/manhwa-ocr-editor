@@ -26,10 +26,11 @@ class EyedropperStaticTests(unittest.TestCase):
         for elem_id in ('inkPick', 'tbColorPick', 'edgePick', 'gmStopPick', 'eyedropLoupe', 'edZoom', 'edHex', 'edTarget'):
             self.assertIn(f'id="{elem_id}"', html)
 
-        # Loupe uses transform translate3d + offscreen canvas getImageData
+        # Loupe uses transform translate3d + offscreen canvas getImageData + restricted Alt context
         self.assertIn('getImageData', js)
         self.assertIn("translate3d(", js)
         self.assertIn("e.key==='Alt'", js)
+        self.assertIn('isColorPickContext', js)
         self.assertIn("e.preventDefault()", js)
         self.assertIn('#viewport.eyedropper', css)
         self.assertIn('#eyedropLoupe', css)
@@ -225,30 +226,53 @@ class EyedropperBrowserTests(unittest.TestCase):
                             tab.locator('#gmOk').click()
                         modal.wait_for(state='hidden')
 
-                        # === 3) Alt-Hold in Normal Mode -> Active Target Tracking (Text & Stroke) + Backend Save ===
-                        # Focus/click Text color (#ink), hold Alt, click SWATCH_RED -> saves text color to backend
+                        # === 3) Normal Mode: Alt-Hold MUST NOT trigger eyedropper (reserved for Alt+Wheel Zoom!) ===
+                        ink_before_normal_alt = tab.locator('#ink').input_value().upper()
+                        edge_before_normal_alt = tab.locator('#edge').input_value().upper()
                         tab.locator('#ink').focus()
                         tab.mouse.move(rx, ry)
                         tab.keyboard.down('Alt')
                         tab.wait_for_timeout(40)
-                        self.assertIn('สีข้อความ', tab.locator('#edTarget').inner_text())
+                        self.assertFalse(loupe.is_visible(), 'Alt-hold in normal mode must NOT show eyedropper loupe')
+                        self.assertNotIn('eyedropper', tab.locator('#viewport').get_attribute('class') or '')
+                        # Alt+Wheel in normal mode zooms smoothly instead of picking color
+                        z_before = tab.locator('#percent').inner_text()
+                        tab.mouse.wheel(0, -120)
+                        self.assertNotEqual(tab.locator('#percent').inner_text(), z_before)
                         tab.mouse.click(rx, ry)
-                        with tab.expect_response(lambda r: '/edit' in r.url and r.ok):
-                            tab.keyboard.up('Alt')
-                        self.assertEqual(tab.locator('#ink').input_value().upper(), SWATCH_RED)
+                        tab.keyboard.up('Alt')
+                        self.assertEqual(tab.locator('#ink').input_value().upper(), ink_before_normal_alt)
+                        self.assertEqual(tab.locator('#edge').input_value().upper(), edge_before_normal_alt)
+                        tab.locator('#percent').click()  # reset zoom to 100%
 
-                        # Focus Stroke color (#edge), hold Alt, click SWATCH_VIOLET -> saves stroke color to backend
-                        tab.locator('#edge').focus()
+                        # === 4) Layer Style — Stroke Modal: Alt+Wheel zooms & Alt+Click picks Stroke color ===
+                        tab.locator('#openStrokeBtn').click()
+                        stroke_modal = tab.locator('#strokeModal')
+                        stroke_modal.wait_for(state='visible')
+                        vx, vy = img_to_client(80, 500)  # SWATCH_VIOLET #7C3AED
                         tab.mouse.move(vx, vy)
                         tab.keyboard.down('Alt')
                         tab.wait_for_timeout(40)
+                        self.assertTrue(loupe.is_visible())
                         self.assertIn('Stroke', tab.locator('#edTarget').inner_text())
+                        # Alt+Wheel while Stroke modal is open zooms canvas smoothly without breaking eyedropper
+                        z_modal_before = tab.locator('#percent').inner_text()
+                        tab.mouse.wheel(0, -120)
+                        self.assertNotEqual(tab.locator('#percent').inner_text(), z_modal_before)
+                        tab.keyboard.up('Alt')
+                        # Reset to 100% and Alt+Left-Click SWATCH_VIOLET into Stroke
+                        tab.locator('#percent').click()
+                        vx, vy = img_to_client(80, 500)
+                        tab.mouse.move(vx, vy)
+                        tab.keyboard.down('Alt')
+                        tab.wait_for_timeout(40)
+                        self.assertEqual(tab.locator('#edHex').inner_text(), SWATCH_VIOLET)
                         tab.mouse.click(vx, vy)
-                        with tab.expect_response(lambda r: '/edit' in r.url and r.ok):
-                            tab.keyboard.up('Alt')
-                        self.assertEqual(tab.locator('#edge').input_value().upper(), SWATCH_VIOLET)
+                        tab.keyboard.up('Alt')
+                        self.assertTrue(stroke_modal.is_visible(), 'Stroke modal must stay open after Alt+Click')
+                        self.assertEqual(tab.locator('#smColor').input_value().upper(), SWATCH_VIOLET)
 
-                        # Measure Loupe 60fps smooth movement performance
+                        # Measure Loupe 60fps smooth movement performance while Stroke color-pick modal is open
                         loupe_fps = tab.evaluate("""() => new Promise(resolve => {
                           const r = document.getElementById('art').getBoundingClientRect();
                           document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Alt', code: 'AltLeft', bubbles: true }));
@@ -265,6 +289,20 @@ class EyedropperBrowserTests(unittest.TestCase):
                           }
                           requestAnimationFrame(step);
                         })""")
+
+                        with tab.expect_response(lambda r: '/edit' in r.url and r.ok):
+                            tab.locator('#smOk').click()
+                        stroke_modal.wait_for(state='hidden')
+                        self.assertEqual(tab.locator('#edge').input_value().upper(), SWATCH_VIOLET)
+
+                        # Set final text color back to SWATCH_RED via button eyedropper (#inkPick)
+                        rx, ry = img_to_client(80, 80)
+                        tab.locator('#inkPick').click()
+                        tab.mouse.move(rx, ry)
+                        tab.wait_for_timeout(40)
+                        with tab.expect_response(lambda r: '/edit' in r.url and r.ok):
+                            tab.mouse.click(rx, ry)
+                        self.assertEqual(tab.locator('#ink').input_value().upper(), SWATCH_RED)
 
                         # Verify final persisted colors in SQLite backend
                         saved_pages, _ = studio.load(key)
