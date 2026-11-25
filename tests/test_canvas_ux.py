@@ -36,6 +36,12 @@ class CanvasUXStaticTests(unittest.TestCase):
         # Text preview layer uses white-space:pre (POINTTEXT parity — never auto-wraps on zoom)
         self.assertIn('.bubble{position:absolute;pointer-events:auto;white-space:pre;', css)
         self.assertNotIn('white-space:pre-wrap', css)
+        # 1:1 PSD parity: Auto Leading 120% (line-height:1.2), zero inner padding in Text view, ink metric compensation
+        self.assertIn('line-height:1.2;', css)
+        self.assertIn('.bubble.view-thai{padding:0;', css)
+        self.assertIn('.bubble>.txt-fill,.bubble>.txt-stroke{grid-area:1/1;position:relative;width:max-content}', css)
+        for token in ('measureTextInkOffset', 'applyTextPlacement', 'actualBoundingBoxAscent', 'actualBoundingBoxDescent'):
+            self.assertIn(token, js)
 
         # 2. Contextual Task Bar mounted once in exact order: grip, font, color, align, size
         bar_idx = html.index('id="textBar"')
@@ -641,6 +647,184 @@ class CanvasUXBrowserTests(unittest.TestCase):
                 finally:
                     server.should_exit = True
                     thread.join(10)
+
+    def test_web_preview_matches_composite_and_photopea_psd_within_3px(self):
+        import io
+        import numpy as np
+        import uvicorn
+        from playwright.sync_api import sync_playwright
+        from psd_tools import PSDImage
+        from photopea_export import PhotopeaSession
+        from photoshop_export import prepare_job
+        from text_layout import composite_text_crop
+
+        def dark_ink_center(img: Image.Image, roi):
+            arr = np.asarray(img.convert('RGB'))
+            x0 = max(0, int(round(roi[0])))
+            y0 = max(0, int(round(roi[1])))
+            x1 = min(arr.shape[1], int(round(roi[2])))
+            y1 = min(arr.shape[0], int(round(roi[3])))
+            crop = arr[y0:y1, x0:x1]
+            mask = (crop[:, :, 0] < 80) & (crop[:, :, 1] < 80) & (crop[:, :, 2] < 80)
+            ys, xs = np.nonzero(mask)
+            self.assertGreater(len(xs), 10, f'No dark text ink found in ROI {roi}')
+            bx0, bx1 = int(xs.min()) + x0, int(xs.max()) + x0 + 1
+            by0, by1 = int(ys.min()) + y0, int(ys.max()) + y0 + 1
+            return ((bx0 + bx1) / 2.0, (by0 + by1) / 2.0)
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(studio, 'ROOT', Path(tmp) / 'studio'):
+            root = Path(tmp)
+            im = Image.new('RGB', (960, 1280), '#ffffff')
+            specs = [
+                # (bubble_box, src, th, extra)
+                ([60, 60, 360, 260], 'SINGLE', 'สวัสดีครับ', {}),
+                ([460, 60, 860, 280], 'MULTI', 'การกลับมาของบรรพชนรุ่นแรกในรอบพันปี', {}),
+                ([80, 380, 420, 620], 'DESC', 'จุดสูงสุดของภูเขาฤดูหนาว', {}),
+                # Offset editor_box vs text_layer.box (simulates big transform box not sharing center with text_layer.box)
+                ([480, 380, 860, 640], 'OFFSET', 'พี่น้องเอ๋ย! นี่คือพื้นที่ต้องห้ามที่สุด', {'offset_editor': (24, -18)}),
+                # Right-aligned multi-line
+                ([80, 740, 440, 980], 'RIGHT', 'เจ้าคิดจริงๆ หรือว่าจะหนีรอดไปได้', {'alignment': 'right'}),
+                # Rotated Thai text
+                ([500, 740, 860, 980], 'ROT', 'หยุดอยู่ตรงนั้นเดี๋ยวนี้!', {'rotation': -12}),
+            ]
+            bubbles = []
+            for box, src, th, extra in specs:
+                b = Bubble(box=box, text=src, translation=th, score=0.99)
+                if 'rotation' in extra:
+                    b.custom_rotation = extra['rotation']
+                b.text_layer = layout_text(im, b)
+                b.text_layer['color'] = [0, 0, 0]
+                b.text_layer['stroke'] = {
+                    'enabled': False, 'size': 3, 'position': 'outside',
+                    'blend_mode': 'Normal', 'opacity': 100, 'color': [255, 255, 255],
+                }
+                b.text_layer['gradient'] = {'enabled': False}
+                if 'alignment' in extra:
+                    b.text_layer['alignment'] = extra['alignment']
+                if 'offset_editor' in extra:
+                    odx, ody = extra['offset_editor']
+                    lb = b.text_layer['box']
+                    b.text_layer['editor_box'] = [
+                        lb[0] - 40 + odx, lb[1] - 35 + ody,
+                        lb[2] + 40 + odx, lb[3] + 35 + ody,
+                    ]
+                bubbles.append(b)
+
+            img_path = root / 'align_page.png'
+            im.save(img_path)
+            page_obj = Page(str(img_path), bubbles)
+
+            # 1) Windows Uniscribe composite_text_crop
+            comp_img = composite_text_crop(im.copy(), bubbles, (0, 0))
+
+            # 2) Photopea headless PSD export
+            job_dir = root / 'pp_job'
+            job = prepare_job(job_dir, im, page_obj, include_text=True)
+            psd_path = root / 'aligned.psd'
+            job['output'] = str(psd_path)
+            sess = PhotopeaSession()
+            try:
+                sess.export_job(job)
+            finally:
+                sess.close()
+            psd_img = PSDImage.open(psd_path).composite()
+
+            # 3) Live Web Preview screenshot in Chromium at 100% and 65% zoom
+            key = 'align1to1'
+            studio.save(key, 'align_page.png', [page_obj], {})
+            with socket.socket() as sock:
+                sock.bind(('127.0.0.1', 0))
+                server = uvicorn.Server(uvicorn.Config(studio.app, log_level='warning'))
+                thread = threading.Thread(target=server.run, kwargs={'sockets': [sock]})
+                thread.start()
+                try:
+                    for _ in range(300):
+                        if server.started:
+                            break
+                        time.sleep(0.02)
+                    self.assertTrue(server.started)
+
+                    with sync_playwright() as pw:
+                        browser = pw.chromium.launch()
+                        ctx = browser.new_context(viewport={'width': 1600, 'height': 1400}, device_scale_factor=1)
+                        tab = ctx.new_page()
+                        errors = []
+                        tab.on('pageerror', lambda err: errors.append(str(err)))
+                        tab.add_init_script(f"localStorage.setItem('studio-project','{key}')")
+                        tab.goto(f'http://127.0.0.1:{sock.getsockname()[1]}')
+                        tab.locator('#bid').wait_for()
+                        tab.locator('#views button', has_text='Text').click()
+                        tab.locator('#percent').click()  # 100% zoom
+                        tab.evaluate('document.fonts.ready')
+                        tab.wait_for_timeout(250)
+                        # Compare mode hides overlay frames/handles so only pure Thai ink on white is captured
+                        tab.locator('#compareBtn').click()
+                        tab.wait_for_timeout(120)
+
+                        web_100 = Image.open(io.BytesIO(tab.locator('#stage').screenshot())).convert('RGB')
+
+                        # Also check at ~65% zoom to verify metric offset scales 1:1 with zoom
+                        tab.evaluate(
+                            """() => {
+                              const vp = document.getElementById('viewport');
+                              const rect = vp.getBoundingClientRect();
+                              let guard = 0;
+                              while (parseInt(document.getElementById('percent').textContent, 10) > 68 && guard++ < 40) {
+                                vp.dispatchEvent(new WheelEvent('wheel', {
+                                  deltaY: 120, altKey: true, cancelable: true, bubbles: true,
+                                  clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2,
+                                }));
+                              }
+                            }"""
+                        )
+                        tab.wait_for_timeout(120)
+                        web_zoomed = Image.open(io.BytesIO(tab.locator('#stage').screenshot())).convert('RGB')
+                        zoom_scale = web_zoomed.width / float(im.width)
+
+                        self.assertEqual(errors, [], f'Browser JS errors: {errors}')
+                        ctx.close()
+                        browser.close()
+                finally:
+                    server.should_exit = True
+                    thread.join(10)
+
+            max_dx_psd = max_dy_psd = max_dx_comp = max_dy_comp = max_dy_zoom = 0.0
+            for idx, b in enumerate(bubbles):
+                lbox = b.text_layer['box']
+                lcx = (lbox[0] + lbox[2]) / 2.0
+                lcy = (lbox[1] + lbox[3]) / 2.0
+                roi = [lbox[0] - 50, lbox[1] - 50, lbox[2] + 50, lbox[3] + 50]
+                w_cx, w_cy = dark_ink_center(web_100, roi)
+                p_cx, p_cy = dark_ink_center(psd_img, roi)
+                c_cx, c_cy = dark_ink_center(comp_img, roi)
+                z_roi = [v * zoom_scale for v in roi]
+                zw_cx, zw_cy = dark_ink_center(web_zoomed, z_roi)
+                zw_cx /= zoom_scale
+                zw_cy /= zoom_scale
+
+                dx_psd, dy_psd = abs(w_cx - p_cx), abs(w_cy - p_cy)
+                dx_comp, dy_comp = abs(w_cx - c_cx), abs(w_cy - c_cy)
+                dx_zoom, dy_zoom = abs(zw_cx - p_cx), abs(zw_cy - p_cy)
+                max_dx_psd = max(max_dx_psd, dx_psd)
+                max_dy_psd = max(max_dy_psd, dy_psd)
+                max_dx_comp = max(max_dx_comp, dx_comp)
+                max_dy_comp = max(max_dy_comp, dy_comp)
+                max_dy_zoom = max(max_dy_zoom, dy_zoom)
+
+                self.assertLessEqual(dx_psd, 3.0, f'Bubble {idx} ({b.text}) Web vs PSD dx={w_cx-p_cx:+.2f}px')
+                self.assertLessEqual(dy_psd, 3.0, f'Bubble {idx} ({b.text}) Web vs PSD dy={w_cy-p_cy:+.2f}px')
+                self.assertLessEqual(dx_comp, 3.0, f'Bubble {idx} ({b.text}) Web vs composite dx={w_cx-c_cx:+.2f}px')
+                self.assertLessEqual(dy_comp, 3.0, f'Bubble {idx} ({b.text}) Web vs composite dy={w_cy-c_cy:+.2f}px')
+                self.assertLessEqual(abs(w_cx - lcx), 3.0, f'Bubble {idx} ({b.text}) Web vs layer.box dx={w_cx-lcx:+.2f}px')
+                self.assertLessEqual(abs(w_cy - lcy), 3.0, f'Bubble {idx} ({b.text}) Web vs layer.box dy={w_cy-lcy:+.2f}px')
+                self.assertLessEqual(dx_zoom, 3.0, f'Bubble {idx} ({b.text}) zoomed Web vs PSD dx={zw_cx-p_cx:+.2f}px')
+                self.assertLessEqual(dy_zoom, 3.0, f'Bubble {idx} ({b.text}) zoomed Web vs PSD dy={zw_cy-p_cy:+.2f}px')
+
+            print(
+                f'1:1 alignment verified across 6 bubbles: max|Web-PSD|=({max_dx_psd:.2f},{max_dy_psd:.2f})px, '
+                f'max|Web-Comp|=({max_dx_comp:.2f},{max_dy_comp:.2f})px, zoomed max|dy|={max_dy_zoom:.2f}px',
+                flush=True,
+            )
 
 
 if __name__ == '__main__':

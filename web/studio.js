@@ -627,8 +627,10 @@ function bounds(b){
  const [tw,th]=l.text_size||[box[2]-box[0],box[3]-box[1]];
  const p=page();
  const W=p?p.width:Math.max(bx[2],box[2]), H=p?p.height:Math.max(bx[3],box[3]);
- const fw=Math.min(W,Math.max(bx[2]-bx[0],tw+2*padX));
- const fh=Math.min(H,Math.max(bx[3]-bx[1],th+2*padY));
+ let fw=Math.min(W,Math.max(bx[2]-bx[0],tw+2*padX));
+ let fh=Math.min(H,Math.max(bx[3]-bx[1],th+2*padY));
+ fw=Math.max(Math.min(fw,2*cx,2*(W-cx)),Math.min(W,tw));
+ fh=Math.max(Math.min(fh,2*cy,2*(H-cy)),Math.min(H,th));
  const ncx=Math.min(Math.max(cx,fw/2),W-fw/2);
  const ncy=Math.min(Math.max(cy,fh/2),H-fh/2);
  return [ncx-fw/2,ncy-fh/2,ncx+fw/2,ncy+fh/2]
@@ -689,6 +691,7 @@ async function applyTransformSnap(snap,toastMsg){
  if(snap.has_text&&snap.editor_box){
   target.text_layer=target.text_layer||{};
   target.text_layer.editor_box=[...snap.editor_box];
+  target.text_layer.box=[...snap.editor_box];
   if(snap.font_size!=null)target.text_layer.font_size=snap.font_size;
   target.text_layer.rotation=snap.rotation??0;
   if(snap.wrapped!=null)target.text_layer.text=snap.wrapped;
@@ -716,13 +719,147 @@ async function performRedo(){
  lastArrowPush={time:0,id:''};
  await applyTransformSnap(entry.after,'Redo: ทำซ้ำ'+entry.label)
 }
-const loadedFonts=new Map();
+const loadedFonts=new Map(), readyFonts=new Set(), textMetricsCache=new Map();
+let _metricsCtx=null, _rotCanvas=null, _rotCtx=null;
+function getMetricsCtx(){
+ if(!_metricsCtx){
+  const c=document.createElement('canvas');
+  c.width=1;c.height=1;
+  _metricsCtx=c.getContext('2d');
+ }
+ return _metricsCtx;
+}
+function measureRotatedInkShift(lines,ms,maxW,fontFamily,sz,lh,alignment,rotDeg){
+ const cssCenterX=maxW/2, cssCenterY=(lines.length*lh)/2;
+ const diag=Math.hypot(maxW+sz*1.5,lines.length*lh+sz*1.5);
+ const rScale=Math.min(1,480/Math.max(1,diag));
+ const dim=Math.max(32,Math.ceil(diag*rScale)+8);
+ if(!_rotCanvas){
+  _rotCanvas=document.createElement('canvas');
+  _rotCtx=_rotCanvas.getContext('2d',{willReadFrequently:true});
+ }
+ if(!_rotCtx)return null;
+ _rotCanvas.width=dim;_rotCanvas.height=dim;
+ const rctx=_rotCtx;
+ rctx.clearRect(0,0,dim,dim);
+ rctx.save();
+ rctx.translate(dim/2,dim/2);
+ rctx.rotate(rotDeg*Math.PI/180);
+ rctx.scale(rScale,rScale);
+ rctx.font=sz+'px '+fontFamily;
+ rctx.textBaseline='alphabetic';
+ rctx.textAlign='left';
+ rctx.fillStyle='#000';
+ for(let i=0;i<lines.length;i++){
+  if(!lines[i]||!lines[i].trim())continue;
+  const m=ms[i];
+  const fA=Number.isFinite(m.fontBoundingBoxAscent)?m.fontBoundingBoxAscent:sz*0.8;
+  const fD=Number.isFinite(m.fontBoundingBoxDescent)?m.fontBoundingBoxDescent:sz*0.2;
+  const yBase=i*lh+(lh+fA-fD)/2;
+  const x0=alignment==='left'?0:alignment==='right'?(maxW-m.width):(maxW-m.width)/2;
+  rctx.fillText(lines[i],x0-cssCenterX,yBase-cssCenterY);
+ }
+ rctx.restore();
+ const data=rctx.getImageData(0,0,dim,dim).data;
+ let minX=dim, maxX=-1, minY=dim, maxY=-1;
+ for(let y=0;y<dim;y++){
+  const row=y*dim*4;
+  for(let x=0;x<dim;x++){
+   if(data[row+x*4+3]>24){
+    if(x<minX)minX=x;if(x>maxX)maxX=x;
+    if(y<minY)minY=y;if(y>maxY)maxY=y;
+   }
+  }
+ }
+ if(maxX<minX||maxY<minY)return null;
+ return {
+  wx:(dim/2-(minX+maxX+1)/2)/rScale,
+  wy:(dim/2-(minY+maxY+1)/2)/rScale
+ };
+}
+function measureTextInkOffset(text,fontFamily,fontSize,alignment='center',rotDeg=0){
+ if(!text||!text.trim()||!fontSize)return {dx:0,dy:0};
+ const rot=Number.isFinite(Number(rotDeg))?Number(rotDeg):0;
+ const isReady=!fontFamily||!fontFamily.startsWith('studio')||readyFonts.has(fontFamily);
+ const cacheKey=fontFamily+'|'+fontSize+'|'+alignment+'|'+rot.toFixed(2)+'|'+text;
+ if(isReady&&textMetricsCache.has(cacheKey))return textMetricsCache.get(cacheKey);
+ const ctx=getMetricsCtx();
+ if(!ctx)return {dx:0,dy:0};
+ const scale=fontSize<64?2:1;
+ const sz=fontSize*scale;
+ const lh=sz*1.2;
+ ctx.font=sz+'px '+fontFamily;
+ ctx.textBaseline='alphabetic';
+ ctx.textAlign='left';
+ const lines=text.split('\n');
+ const ms=lines.map(line=>ctx.measureText(line||' '));
+ const maxW=Math.max(0,...ms.map((m,i)=>lines[i]?m.width:0));
+ const cssCenterX=maxW/2, cssCenterY=(lines.length*lh)/2;
+ const rad=rot*Math.PI/180, cosR=Math.cos(rad), sinR=Math.sin(rad);
+ let res={dx:0,dy:0};
+ if(Math.abs(rot)>=0.05){
+  const rotShift=measureRotatedInkShift(lines,ms,maxW,fontFamily,sz,lh,alignment,rot);
+  if(rotShift){
+   const swx=rotShift.wx/scale, swy=rotShift.wy/scale;
+   res={dx:swx*cosR+swy*sinR, dy:-swx*sinR+swy*cosR};
+  }
+ }else{
+  let minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity;
+  for(let i=0;i<lines.length;i++){
+   if(!lines[i]||!lines[i].trim())continue;
+   const m=ms[i];
+   const fA=Number.isFinite(m.fontBoundingBoxAscent)?m.fontBoundingBoxAscent:sz*0.8;
+   const fD=Number.isFinite(m.fontBoundingBoxDescent)?m.fontBoundingBoxDescent:sz*0.2;
+   const aA=Number.isFinite(m.actualBoundingBoxAscent)?m.actualBoundingBoxAscent:fA;
+   const aD=Number.isFinite(m.actualBoundingBoxDescent)?m.actualBoundingBoxDescent:fD;
+   const yBase=i*lh+(lh+fA-fD)/2;
+   const aL=Number.isFinite(m.actualBoundingBoxLeft)?m.actualBoundingBoxLeft:0;
+   const aR=Number.isFinite(m.actualBoundingBoxRight)?m.actualBoundingBoxRight:m.width;
+   const x0=alignment==='left'?0:alignment==='right'?(maxW-m.width):(maxW-m.width)/2;
+   minX=Math.min(minX,x0-aL-cssCenterX);maxX=Math.max(maxX,x0+aR-cssCenterX);
+   minY=Math.min(minY,yBase-aA-cssCenterY);maxY=Math.max(maxY,yBase+aD-cssCenterY);
+  }
+  if(Number.isFinite(minX)&&Number.isFinite(maxX)&&Number.isFinite(minY)&&Number.isFinite(maxY)){
+   res={dx:-((minX+maxX)/2)/scale, dy:-((minY+maxY)/2)/scale};
+  }
+ }
+ if(isReady){
+  if(textMetricsCache.size>512)textMetricsCache.clear();
+  textMetricsCache.set(cacheKey,res);
+ }
+ return res;
+}
+function applyTextPlacement(fillLabel,strokeLabel,b,rect,textMode){
+ if(!fillLabel)return;
+ const l=b?.text_layer||{};
+ const txt=textMode&&!l.hidden?(l.text||b.translation||''):'';
+ if(!textMode||!txt.trim()){
+  fillLabel.style.transform='';
+  if(strokeLabel)strokeLabel.style.transform='';
+  return;
+ }
+ const rectCx=(rect[0]+rect[2])/2, rectCy=(rect[1]+rect[3])/2;
+ const tbox=Array.isArray(l.box)&&l.box.length===4?l.box:rect;
+ const targetCx=(tbox[0]+tbox[2])/2, targetCy=(tbox[1]+tbox[3])/2;
+ const worldDx=targetCx-rectCx, worldDy=targetCy-rectCy;
+ const rotDeg=l.rotation||0;
+ const rotRad=-(rotDeg*Math.PI/180);
+ const cos=Math.cos(rotRad), sin=Math.sin(rotRad);
+ const localDx=worldDx*cos-worldDy*sin;
+ const localDy=worldDx*sin+worldDy*cos;
+ const metric=measureTextInkOffset(txt,family(b.font_choice),l.font_size||24,l.alignment||'center',rotDeg);
+ const tx=(localDx+metric.dx)*zoom;
+ const ty=(localDy+metric.dy)*zoom;
+ const tr=(Math.abs(tx)>0.01||Math.abs(ty)>0.01)?'translate('+tx.toFixed(2)+'px,'+ty.toFixed(2)+'px)':'';
+ fillLabel.style.transform=tr;
+ if(strokeLabel)strokeLabel.style.transform=tr;
+}
 function family(font){
  if(!font)return 'sans-serif';
  if(!loadedFonts.has(font)){
   let name='studio'+loadedFonts.size;loadedFonts.set(font,name);
   let f=new FontFace(name,'url("/api/font/'+encodeURIComponent(font)+'")');
-  f.load().then(face=>document.fonts.add(face)).catch(()=>{})
+  f.load().then(face=>{document.fonts.add(face);readyFonts.add(name);textMetricsCache.clear();if(page())draw()}).catch(()=>{})
  }
  return loadedFonts.get(font)
 }
@@ -950,6 +1087,7 @@ function applyLiveBubbleStyle(){
  if(sp)sp.textContent=txt;
  if(spStroke)spStroke.textContent=txt;
  applyLabelEffects(sp,spStroke,l,textMode,b.id);
+ applyTextPlacement(sp,spStroke,b,rect,textMode);
  updateCoordInfo()
 }
 function updateCoordInfo(){
@@ -1025,6 +1163,7 @@ function draw(){
    color:rgb(l.color),transform:'rotate('+(textMode?l.rotation||0:0)+'deg)'
   });
   applyLabelEffects(label,strokeLabel,l,textMode,b.id);
+  applyTextPlacement(label,strokeLabel,b,rect,textMode);
   div.append(label,strokeLabel);
   // Show corner status badge only in ต้นฉบับ / คลีน views — keep Text view completely unobstructed!
   if(!showText){
@@ -2030,7 +2169,7 @@ $('viewport').onpointermove=e=>{
   const cx=(x+r)/2+shiftX*c-shiftY*s,cy=(y+bt)/2+shiftX*s+shiftY*c;
   x=cx-nw/2;r=cx+nw/2;y=cy-nh/2;bt=cy+nh/2
  }
- let rect=[x,y,r,bt];layer().editor_box=rect;if(k.length===1)layer().text=reflow(bubble(),r-x,bt-y);applyLiveBubbleStyle()
+ let rect=[x,y,r,bt];layer().editor_box=rect;layer().box=rect;if(k.length===1)layer().text=reflow(bubble(),r-x,bt-y);applyLiveBubbleStyle()
 };
 $('viewport').onpointerup=e=>{
  if(eyedropDrag&&(e.pointerId===undefined||eyedropDrag.pointerId===e.pointerId)){
@@ -2418,8 +2557,10 @@ document.onkeydown=e=>{
   let before=captureTransform(bubble());
   let dx=({ArrowLeft:-1,ArrowRight:1}[e.key]||0)*(e.shiftKey?5:1),dy=({ArrowUp:-1,ArrowDown:1}[e.key]||0)*(e.shiftKey?5:1);
   if(isTextTransform(bubble())){
-   layer().editor_box=bounds(bubble()).map((v,i)=>v+(i%2?dy:dx));
-   queueEdit({box:bounds(bubble())});
+   const moved=bounds(bubble()).map((v,i)=>v+(i%2?dy:dx));
+   layer().editor_box=moved;
+   layer().box=moved;
+   queueEdit({box:moved});
   }else{
    let [x0,y0,x1,y1]=bubble().box;
    let W=page().width,H=page().height,bw=x1-x0,bh=y1-y0;
