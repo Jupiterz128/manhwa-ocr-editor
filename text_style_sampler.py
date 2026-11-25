@@ -5,7 +5,14 @@ import numpy as np
 from PIL import Image, ImageOps
 
 DEFAULTS = {
-    'stroke': {'enabled': False, 'color': [255, 255, 255], 'size': 3},
+    'stroke': {
+        'enabled': False,
+        'color': [255, 255, 255],
+        'size': 3,
+        'position': 'outside',
+        'opacity': 100,
+        'blend_mode': 'Normal',
+    },
     'gradient': {
         'enabled': False,
         'start_color': [255, 255, 255],
@@ -26,6 +33,13 @@ DEFAULTS = {
 
 GRADIENT_STYLES = ('linear', 'radial', 'reflected')
 GRADIENT_BLEND_MODES = ('normal', 'multiply', 'screen', 'overlay')
+STROKE_POSITIONS = ('outside', 'center', 'inside')
+STROKE_BLEND_MODES = {
+    'normal': 'Normal',
+    'multiply': 'Multiply',
+    'screen': 'Screen',
+    'overlay': 'Overlay',
+}
 
 
 def _rgb_to_hex(rgb):
@@ -76,7 +90,7 @@ def _normalize_stops(raw_stops, fallback_start, fallback_end):
 def effects(layer=None):
     style = copy.deepcopy(DEFAULTS)
     src = layer or {}
-    # Stroke
+    # Stroke (backwards-compatible with legacy files lacking position/opacity/blend_mode)
     s_in = src.get('stroke', {})
     if isinstance(s_in, dict):
         st = style['stroke']
@@ -85,8 +99,17 @@ def effects(layer=None):
         if col is not None:
             st['color'] = col
         sz = s_in.get('size')
-        if isinstance(sz, int) and not isinstance(sz, bool):
-            st['size'] = max(1, min(8, sz))
+        if isinstance(sz, (int, float)) and not isinstance(sz, bool) and np.isfinite(sz):
+            st['size'] = max(1, min(20, int(round(float(sz)))))
+        pos = str(s_in.get('position') or '').strip().lower()
+        if pos in STROKE_POSITIONS:
+            st['position'] = pos
+        opct = s_in.get('opacity')
+        if isinstance(opct, (int, float)) and not isinstance(opct, bool) and np.isfinite(opct):
+            st['opacity'] = max(0, min(100, int(round(float(opct)))))
+        sbm = str(s_in.get('blend_mode') or '').strip().lower()
+        if sbm in STROKE_BLEND_MODES:
+            st['blend_mode'] = STROKE_BLEND_MODES[sbm]
 
     # Gradient Overlay (backwards-compatible with start_color/end_color + full Photoshop Classic multi-stop)
     g_in = src.get('gradient', {})
@@ -237,60 +260,111 @@ def sample_style(orig, cleaned, bubble, *, include_color=False):
     return style
 
 
+def _blend_rgb_arrays(base_rgb, top_rgb, mode):
+    bmode = str(mode or 'normal').strip().lower()
+    if bmode == 'multiply':
+        return (base_rgb / 255.0) * (top_rgb / 255.0) * 255.0
+    if bmode == 'screen':
+        return (1.0 - (1.0 - base_rgb / 255.0) * (1.0 - top_rgb / 255.0)) * 255.0
+    if bmode == 'overlay':
+        bn, gn = base_rgb / 255.0, top_rgb / 255.0
+        return np.where(bn < 0.5, 2.0 * bn * gn, 1.0 - 2.0 * (1.0 - bn) * (1.0 - gn)) * 255.0
+    return top_rgb
+
+
 def styled_tile(tile, layer):
-    style=effects(layer)
-    stroke,grad=style['stroke'],style['gradient']
+    style = effects(layer)
+    stroke, grad = style['stroke'], style['gradient']
+    tile = tile.convert('RGBA')
     if grad['enabled']:
-        w,h=tile.size
-        angle=np.deg2rad(grad['angle'])
-        y,x=np.ogrid[:h,:w]
-        gstyle=grad.get('style','linear')
-        scale=max(0.1, float(grad.get('scale',100))/100.0)
-        if gstyle=='radial':
-            cx,cy=(w-1)/2.0,(h-1)/2.0
-            rad=max(1.0, np.hypot(cx,cy))
-            t=np.hypot(x-cx,y-cy)/(rad*scale)
-            t=np.clip(t,0.0,1.0)
+        w, h = tile.size
+        angle = np.deg2rad(grad['angle'])
+        y, x = np.ogrid[:h, :w]
+        gstyle = grad.get('style', 'linear')
+        scale = max(0.1, float(grad.get('scale', 100)) / 100.0)
+        if gstyle == 'radial':
+            cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
+            rad = max(1.0, np.hypot(cx, cy))
+            t = np.hypot(x - cx, y - cy) / (rad * scale)
+            t = np.clip(t, 0.0, 1.0)
         else:
-            axis=x*np.cos(angle)-y*np.sin(angle)
-            t=(axis-axis.min())/max(1.0,float(np.ptp(axis)))
-            if gstyle=='reflected':
-                t=np.abs(t-0.5)*2.0/scale
+            axis = x * np.cos(angle) - y * np.sin(angle)
+            t = (axis - axis.min()) / max(1.0, float(np.ptp(axis)))
+            if gstyle == 'reflected':
+                t = np.abs(t - 0.5) * 2.0 / scale
             else:
-                t=0.5+(t-0.5)/scale
-            t=np.clip(t,0.0,1.0)
+                t = 0.5 + (t - 0.5) / scale
+            t = np.clip(t, 0.0, 1.0)
         if grad.get('reverse'):
-            t=1.0-t
-        stops=grad.get('stops') or [
-            {'pos':0,'color':_rgb_to_hex(grad['start_color'])},
-            {'pos':100,'color':_rgb_to_hex(grad['end_color'])},
+            t = 1.0 - t
+        stops = grad.get('stops') or [
+            {'pos': 0, 'color': _rgb_to_hex(grad['start_color'])},
+            {'pos': 100, 'color': _rgb_to_hex(grad['end_color'])},
         ]
-        s_pos=np.array([float(s['pos'])/100.0 for s in stops],dtype=np.float32)
-        s_rgb=np.array([_parse_color_rgb(s['color']) or [255,255,255] for s in stops],dtype=np.float32)
-        flat=t.ravel().astype(np.float32)
-        grad_rgb=np.stack([np.interp(flat,s_pos,s_rgb[:,ch]) for ch in range(3)],axis=-1).reshape(h,w,3)
-        base_rgb=np.asarray(tile.convert('RGB'),dtype=np.float32)
-        bmode=grad.get('blend_mode','normal')
-        if bmode=='multiply':
-            blended=(base_rgb/255.0)*(grad_rgb/255.0)*255.0
-        elif bmode=='screen':
-            blended=(1.0-(1.0-base_rgb/255.0)*(1.0-grad_rgb/255.0))*255.0
-        elif bmode=='overlay':
-            bn,gn=base_rgb/255.0,grad_rgb/255.0
-            blended=np.where(bn<0.5,2.0*bn*gn,1.0-2.0*(1.0-bn)*(1.0-gn))*255.0
-        else:
-            blended=grad_rgb
-        opct=max(0.0,min(1.0,float(grad.get('opacity',100))/100.0))
-        colors=base_rgb*(1.0-opct)+blended*opct
-        fill=Image.fromarray(np.clip(colors,0,255).round().astype('uint8'))
+        s_pos = np.array([float(s['pos']) / 100.0 for s in stops], dtype=np.float32)
+        s_rgb = np.array([_parse_color_rgb(s['color']) or [255, 255, 255] for s in stops], dtype=np.float32)
+        flat = t.ravel().astype(np.float32)
+        grad_rgb = np.stack([np.interp(flat, s_pos, s_rgb[:, ch]) for ch in range(3)], axis=-1).reshape(h, w, 3)
+        base_rgb = np.asarray(tile.convert('RGB'), dtype=np.float32)
+        blended = _blend_rgb_arrays(base_rgb, grad_rgb, grad.get('blend_mode', 'normal'))
+        opct = max(0.0, min(1.0, float(grad.get('opacity', 100)) / 100.0))
+        colors = base_rgb * (1.0 - opct) + blended * opct
+        fill = Image.fromarray(np.clip(colors, 0, 255).round().astype('uint8'))
         fill.putalpha(tile.getchannel('A'))
-        tile=fill
+        tile = fill
     if stroke['enabled']:
-        n=stroke['size']
-        tile=ImageOps.expand(tile.convert('RGBA'),border=n,fill=(0,0,0,0))
-        kernel=cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(2*n+1,2*n+1))
-        outline=Image.new('RGBA',tile.size,tuple(stroke['color'])+(0,))
-        outline.putalpha(Image.fromarray(cv2.dilate(np.array(tile.getchannel('A')),kernel)))
-        outline.alpha_composite(tile)
-        tile=outline
+        n = max(1, min(20, int(stroke['size'])))
+        pos = str(stroke.get('position') or 'outside').strip().lower()
+        opct = max(0.0, min(1.0, float(stroke.get('opacity', 100)) / 100.0))
+        bmode = str(stroke.get('blend_mode') or 'Normal').strip().lower()
+        scol = tuple(int(c) for c in stroke['color'])
+        if pos == 'outside':
+            # Outer stroke sits strictly behind the filled/gradient glyph body.
+            tile = ImageOps.expand(tile, border=n, fill=(0, 0, 0, 0))
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * n + 1, 2 * n + 1))
+            dilated = cv2.dilate(np.array(tile.getchannel('A')), kernel)
+            outline_alpha = np.clip(np.round(dilated.astype(np.float32) * opct), 0, 255).astype(np.uint8)
+            outline = Image.new('RGBA', tile.size, scol + (0,))
+            outline.putalpha(Image.fromarray(outline_alpha))
+            outline.alpha_composite(tile)
+            tile = outline
+        elif pos == 'inside':
+            # Inside stroke sits strictly within the glyph alpha silhouette.
+            alpha = np.array(tile.getchannel('A'))
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * n + 1, 2 * n + 1))
+            eroded = cv2.erode(alpha, kernel)
+            ring = np.clip(alpha.astype(np.int16) - eroded.astype(np.int16), 0, 255).astype(np.float32) / 255.0
+            weight = (ring * opct)[:, :, None]
+            base_rgb = np.asarray(tile.convert('RGB'), dtype=np.float32)
+            top_rgb = np.broadcast_to(np.array(scol, dtype=np.float32), base_rgb.shape)
+            blended = _blend_rgb_arrays(base_rgb, top_rgb, bmode)
+            out_rgb = np.clip(np.round(base_rgb * (1.0 - weight) + blended * weight), 0, 255).astype(np.uint8)
+            out_img = Image.fromarray(out_rgb)
+            out_img.putalpha(tile.getchannel('A'))
+            tile = out_img
+        else:
+            # Center stroke extends half outside (behind text) and half inside (over text).
+            out_r = max(1, (n + 1) // 2)
+            in_r = max(0, n // 2)
+            tile = ImageOps.expand(tile, border=out_r, fill=(0, 0, 0, 0))
+            alpha = np.array(tile.getchannel('A'))
+            out_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * out_r + 1, 2 * out_r + 1))
+            dilated = cv2.dilate(alpha, out_k)
+            outline_alpha = np.clip(np.round(dilated.astype(np.float32) * opct), 0, 255).astype(np.uint8)
+            outline = Image.new('RGBA', tile.size, scol + (0,))
+            outline.putalpha(Image.fromarray(outline_alpha))
+            if in_r > 0:
+                in_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * in_r + 1, 2 * in_r + 1))
+                eroded = cv2.erode(alpha, in_k)
+                ring = np.clip(alpha.astype(np.int16) - eroded.astype(np.int16), 0, 255).astype(np.float32) / 255.0
+                weight = (ring * opct)[:, :, None]
+                base_rgb = np.asarray(tile.convert('RGB'), dtype=np.float32)
+                top_rgb = np.broadcast_to(np.array(scol, dtype=np.float32), base_rgb.shape)
+                blended = _blend_rgb_arrays(base_rgb, top_rgb, bmode)
+                inner_rgb = np.clip(np.round(base_rgb * (1.0 - weight) + blended * weight), 0, 255).astype(np.uint8)
+                inner_img = Image.fromarray(inner_rgb)
+                inner_img.putalpha(tile.getchannel('A'))
+                tile = inner_img
+            outline.alpha_composite(tile)
+            tile = outline
     return tile

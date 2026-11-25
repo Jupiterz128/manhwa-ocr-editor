@@ -102,6 +102,7 @@ function isTextTransform(b){
 async function project(k,title){
  cancelEyedropper();
  if(gradModalOpen)closeGradModal(false);
+ if(strokeModalOpen)closeStrokeModal(false);
  await flush();
  if(maskEdit)await cancelMaskEdit(true);
  let st=await api(k+'/state');key=k;localStorage.setItem('studio-project',k);pages=st.pages;fonts=st.fonts;jsonPath=st.json_path||'';
@@ -132,12 +133,14 @@ $('files').onchange=()=>run(async()=>{if(!$('files').files.length)return;await f
 async function selectPage(i){
  cancelEyedropper();
  if(gradModalOpen)closeGradModal(false);
+ if(strokeModalOpen)closeStrokeModal(false);
  await flush();
  if(maskEdit)await cancelMaskEdit(true);
  n=i;id=page().bubbles[0]?.id||'';drawFrame=false;compareOriginal=false;fit();refresh()
 }
 function selectBubble(i){
  if(gradModalOpen&&i!==id)closeGradModal(false);
+ if(strokeModalOpen&&i!==id)closeStrokeModal(false);
  if(maskEdit){
   return (async()=>{
    await flush();
@@ -424,11 +427,13 @@ function applyStrokeColor(b,hexVal,commit=false,flushNow=false){
  const hexLower=String(hexVal).toLowerCase();
  const col=triplet(hexLower);
  const l=b.text_layer||(b.text_layer={});
- const sz=Math.max(1,Math.min(8,+($('width')?.value||l.stroke?.size||3)));
+ const stroke=normalizeStroke(l.stroke);
+ stroke.enabled=true;
+ stroke.color=col;
  if($('edge')&&$('edge').value!==hexLower)$('edge').value=hexLower;
  if($('stroke')&&!$('stroke').checked)$('stroke').checked=true;
- const stroke={enabled:true,color:col,size:sz};
  l.stroke=stroke;
+ syncInspectorStrokeUi(stroke);
  if(commit){
   const style={stroke,gradient:normalizeGradient(l.gradient)};
   Object.assign(l,style);
@@ -728,6 +733,55 @@ function hexToRgb(col){
  if(s.length===3)s=s[0]+s[0]+s[1]+s[1]+s[2]+s[2];
  return [parseInt(s.slice(0,2),16)||0,parseInt(s.slice(2,4),16)||0,parseInt(s.slice(4,6),16)||0];
 }
+const STROKE_POSITIONS=['outside','center','inside'];
+const STROKE_POS_LABELS={outside:'Outside',center:'Center',inside:'Inside'};
+const STROKE_BLEND_MAP={normal:'Normal',multiply:'Multiply',screen:'Screen',overlay:'Overlay'};
+function normalizeStroke(raw){
+ const s=raw||{};
+ const col=hexToRgb(Array.isArray(s.color)&&s.color.length===3?s.color:(typeof s.color==='string'?s.color:[255,255,255]));
+ const rawSize=Number(s.size);
+ const size=Number.isFinite(rawSize)?Math.max(1,Math.min(20,Math.round(rawSize))):3;
+ const rawPos=String(s.position||'').trim().toLowerCase();
+ const position=STROKE_POSITIONS.includes(rawPos)?rawPos:'outside';
+ const rawOpct=s.opacity;
+ const opacity=typeof rawOpct==='number'&&Number.isFinite(rawOpct)?Math.max(0,Math.min(100,Math.round(rawOpct))):100;
+ const rawBm=String(s.blend_mode||'').trim().toLowerCase();
+ const blend_mode=STROKE_BLEND_MAP[rawBm]||'Normal';
+ return {enabled:!!s.enabled,color:col,size,position,opacity,blend_mode};
+}
+const strokeFilterNodes=new Map();
+function ensureInsideStrokeFilter(bid,radiusPx){
+ const defs=$('strokeSvgDefs')?.querySelector('defs');
+ if(!defs)return '';
+ const fkey='sin_'+String(bid||'cur').replace(/[^a-zA-Z0-9_-]/g,'_');
+ const r=Math.max(0.5,Math.min(100,Number(radiusPx)||1));
+ let entry=strokeFilterNodes.get(fkey);
+ if(!entry){
+  const NS='http://www.w3.org/2000/svg';
+  const flt=document.createElementNS(NS,'filter');
+  flt.setAttribute('id',fkey);
+  flt.setAttribute('x','-10%');
+  flt.setAttribute('y','-10%');
+  flt.setAttribute('width','120%');
+  flt.setAttribute('height','120%');
+  const morph=document.createElementNS(NS,'feMorphology');
+  morph.setAttribute('in','SourceAlpha');
+  morph.setAttribute('operator','erode');
+  morph.setAttribute('radius',r.toFixed(2));
+  morph.setAttribute('result','eroded');
+  const comp=document.createElementNS(NS,'feComposite');
+  comp.setAttribute('in','SourceGraphic');
+  comp.setAttribute('in2','eroded');
+  comp.setAttribute('operator','out');
+  flt.append(morph,comp);
+  defs.append(flt);
+  entry={flt,morph};
+  strokeFilterNodes.set(fkey,entry);
+ }else{
+  entry.morph.setAttribute('radius',r.toFixed(2));
+ }
+ return 'url(#'+fkey+')';
+}
 function normalizeGradient(raw){
  const g=raw||{};
  const sc=Array.isArray(g.start_color)&&g.start_color.length===3?g.start_color:[255,255,255];
@@ -817,26 +871,64 @@ function buildCssGradient(rawGrad,baseColor){
  const parts=ordered.map(s=>fmt(s.rgb)+' '+(50+(s.pos-50)*scl).toFixed(2)+'%');
  return 'linear-gradient('+cssAngle+'deg,'+parts.join(',')+')';
 }
-function applyLabelEffects(label,l,textMode){
- if(!label)return;
- const s=l?.stroke, g=l?.gradient;
- if(textMode&&s?.enabled){
-  label.style.webkitTextStroke=2*s.size*zoom+'px '+rgb(s.color);
-  label.style.paintOrder='stroke fill';
+function applyLabelEffects(fillLabel,strokeLabel,l,textMode,bid){
+ if(!fillLabel)return;
+ const s=normalizeStroke(l?.stroke), g=l?.gradient;
+ const active=textMode&&!l?.hidden;
+ fillLabel.style.zIndex='1';
+ fillLabel.style.webkitTextStroke='';
+ fillLabel.style.paintOrder='';
+ if(active&&g?.enabled){
+  fillLabel.style.backgroundImage=buildCssGradient(g,l.color);
+  fillLabel.style.backgroundClip='text';
+  fillLabel.style.webkitBackgroundClip='text';
+  fillLabel.style.webkitTextFillColor='transparent';
  }else{
-  label.style.webkitTextStroke='';
-  label.style.paintOrder='';
+  fillLabel.style.backgroundImage='';
+  fillLabel.style.backgroundClip='';
+  fillLabel.style.webkitBackgroundClip='';
+  fillLabel.style.webkitTextFillColor='';
  }
- if(textMode&&g?.enabled){
-  label.style.backgroundImage=buildCssGradient(g,l.color);
-  label.style.backgroundClip='text';
-  label.style.webkitBackgroundClip='text';
-  label.style.webkitTextFillColor='transparent';
+ if(!strokeLabel)return;
+ if(active&&s.enabled){
+  const colStr=rgb(s.color);
+  strokeLabel.hidden=false;
+  strokeLabel.dataset.strokePosition=s.position;
+  strokeLabel.style.opacity=String(s.opacity/100);
+  strokeLabel.style.mixBlendMode=s.blend_mode.toLowerCase();
+  if(s.position==='outside'){
+   strokeLabel.style.zIndex='0';
+   strokeLabel.style.webkitTextStroke=(2*s.size*zoom)+'px '+colStr;
+   strokeLabel.style.webkitTextFillColor=colStr;
+   strokeLabel.style.color=colStr;
+   strokeLabel.style.paintOrder='stroke fill';
+   strokeLabel.style.filter='';
+  }else if(s.position==='center'){
+   strokeLabel.style.zIndex='2';
+   strokeLabel.style.webkitTextStroke=(s.size*zoom)+'px '+colStr;
+   strokeLabel.style.webkitTextFillColor='transparent';
+   strokeLabel.style.color='transparent';
+   strokeLabel.style.paintOrder='stroke fill';
+   strokeLabel.style.filter='';
+  }else{
+   strokeLabel.style.zIndex='2';
+   strokeLabel.style.webkitTextStroke='';
+   strokeLabel.style.paintOrder='';
+   strokeLabel.style.color=colStr;
+   strokeLabel.style.webkitTextFillColor=colStr;
+   strokeLabel.style.filter=ensureInsideStrokeFilter(bid,s.size*zoom);
+  }
  }else{
-  label.style.backgroundImage='';
-  label.style.backgroundClip='';
-  label.style.webkitBackgroundClip='';
-  label.style.webkitTextFillColor='';
+  strokeLabel.hidden=true;
+  strokeLabel.dataset.strokePosition='';
+  strokeLabel.style.zIndex='0';
+  strokeLabel.style.webkitTextStroke='';
+  strokeLabel.style.webkitTextFillColor='';
+  strokeLabel.style.color='';
+  strokeLabel.style.paintOrder='';
+  strokeLabel.style.opacity='';
+  strokeLabel.style.mixBlendMode='';
+  strokeLabel.style.filter='';
  }
 }
 function applyLiveBubbleStyle(){
@@ -850,9 +942,12 @@ function applyLiveBubbleStyle(){
   fontSize:(l.font_size||24)*zoom+'px',fontFamily:family(b.font_choice),textAlign:l.alignment||'center',
   color:rgb(l.color),transform:'rotate('+(textMode?l.rotation||0:0)+'deg)'
  });
- const sp=node.querySelector('span');
- if(sp&&textMode&&!l.hidden)sp.textContent=l.text||b.translation;
- applyLabelEffects(sp,l,textMode);
+ const sp=node.querySelector('.txt-fill')||node.querySelector('span');
+ const spStroke=node.querySelector('.txt-stroke');
+ const txt=textMode&&!l.hidden?(l.text||b.translation):'';
+ if(sp)sp.textContent=txt;
+ if(spStroke)spStroke.textContent=txt;
+ applyLabelEffects(sp,spStroke,l,textMode,b.id);
  updateCoordInfo()
 }
 function updateCoordInfo(){
@@ -913,7 +1008,11 @@ function draw(){
   let l=b.text_layer||{};
   let textMode=isTextTransform(b);
   let rect=textMode?bounds(b):b.box,[x,y,r,bt]=rect;
-  let div=el('div'),label=el('span',textMode&&!l.hidden?(l.text||b.translation):'');
+  let txt=textMode&&!l.hidden?(l.text||b.translation):'';
+  let div=el('div'),label=el('span',txt),strokeLabel=el('div',txt);
+  label.className='txt-fill';
+  strokeLabel.className='txt-stroke';
+  strokeLabel.setAttribute('aria-hidden','true');
   let stInfo=statusOf(b);
   div.className='bubble '+stInfo.cls+(showText?' view-thai':'');
   if(maskEdit)div.classList.add(b.id===id?'mask-active':'mask-dim');
@@ -923,8 +1022,8 @@ function draw(){
    fontSize:(l.font_size||24)*zoom+'px',fontFamily:family(b.font_choice),textAlign:l.alignment||'center',
    color:rgb(l.color),transform:'rotate('+(textMode?l.rotation||0:0)+'deg)'
   });
-  applyLabelEffects(label,l,textMode);
-  div.append(label);
+  applyLabelEffects(label,strokeLabel,l,textMode,b.id);
+  div.append(label,strokeLabel);
   // Show corner status badge only in ต้นฉบับ / คลีน views — keep Text view completely unobstructed!
   if(!showText){
    let badge=el('small','B'+String(idx+1).padStart(2,'0')+' · '+(b.id===id?'เลือกอยู่':stInfo.label));
@@ -992,20 +1091,33 @@ function mountInspectorOnce(){
  $('size').onchange=()=>{sliderDragging=false;const b=bubble();if(!b)return;let v=+$('size').value;applyTypographySize(b,v,true,inspectorSizeBefore);inspectorSizeBefore=null};
  $('size').onpointerup=$('size').onpointercancel=()=>{sliderDragging=false};
  $('edge').onpointerdown=$('edge').onfocus=()=>{lastColorTarget='stroke'};
- $('stroke').onpointerdown=$('stroke').onfocus=$('width').onfocus=()=>{lastColorTarget='stroke'};
- $('stroke').oninput=$('edge').oninput=$('width').oninput=$('gradient').onchange=e=>{
-  if(e?.target===$('edge')||e?.target===$('stroke')||e?.target===$('width'))lastColorTarget='stroke';
+ $('stroke').onpointerdown=$('stroke').onfocus=()=>{lastColorTarget='stroke'};
+ $('stroke').onchange=$('edge').oninput=$('gradient').onchange=e=>{
+  if(e?.target===$('edge')||e?.target===$('stroke'))lastColorTarget='stroke';
   const b=bubble(),l=layer();if(!b)return;
+  const s=normalizeStroke(l.stroke);
+  s.enabled=$('stroke').checked;
+  if($('edge'))s.color=triplet($('edge').value);
   const g=normalizeGradient(l.gradient);
   g.enabled=$('gradient').checked;
-  let style={stroke:{enabled:$('stroke').checked,color:triplet($('edge').value),size:Math.max(1,Math.min(8,+$('width').value))},gradient:g};
+  let style={stroke:s,gradient:g};
   Object.assign(l,style);
+  syncInspectorStrokeUi(s);
   syncInspectorGradSwatch(g);
   queueEdit({style});
   applyLiveBubbleStyle();
   sidebar();
  };
+ $('openStrokeBtn').onclick=()=>openStrokeModal();
  $('openGradBtn').onclick=()=>openGradModal();
+}
+function syncInspectorStrokeUi(s){
+ const ns=normalizeStroke(s);
+ const meta=$('inspStrokeMeta');
+ if(meta)meta.textContent=ns.size+'px · '+(STROKE_POS_LABELS[ns.position]||'Outside');
+ const edge=$('edge');
+ const hex=rgb(ns.color);
+ if(edge&&edge.value!==hex)edge.value=hex;
 }
 function syncInspectorGradSwatch(g){
  const sw=$('inspGradSwatch');
@@ -1020,7 +1132,7 @@ function inspect(){
  $('inspForm').hidden=!b;
  if(!b)return;
  syncFontOptions();
- let l=b.text_layer||{},s=l.stroke||{},g=normalizeGradient(l.gradient);
+ let l=b.text_layer||{},s=normalizeStroke(l.stroke),g=normalizeGradient(l.gradient);
  $('bid').textContent=bubbleCode(b);$('bid').title=b.id;
  let ft=b.frame_type||'normal';
  $('frameBadge').textContent=FRAME_SHORT[ft]||ft;
@@ -1031,7 +1143,8 @@ function inspect(){
  $('font').value=b.font_choice||fonts[0]||'';
  $('source').value=b.text;$('thai').value=b.translation;$('ink').value=rgb(l.color);$('rotation').value=l.rotation||0;$('align').value=l.alignment||'center';$('size').value=l.font_size||24;$('sizeValue').value=$('size').value;
  updateCoordInfo();
- $('stroke').checked=!!s.enabled;$('edge').value=rgb(s.color||[255,255,255]);$('width').value=s.size||3;
+ $('stroke').checked=!!s.enabled;
+ syncInspectorStrokeUi(s);
  $('gradient').checked=!!g.enabled;
  syncInspectorGradSwatch(g);
 }
@@ -1065,8 +1178,9 @@ function applyLiveGradientOnly(){
  l.gradient=gradDraft;
  const node=$('overlay')?.querySelector('.bubble.selected');
  if(node){
-  const sp=node.querySelector('span');
-  applyLabelEffects(sp,l,isTextTransform(b));
+  const sp=node.querySelector('.txt-fill')||node.querySelector('span');
+  const spStroke=node.querySelector('.txt-stroke');
+  applyLabelEffects(sp,spStroke,l,isTextTransform(b),b.id);
  }
  syncInspectorGradSwatch(gradDraft);
 }
@@ -1175,6 +1289,7 @@ function openGradModal(){
  const b=bubble();
  if(!b||maskEdit)return;
  if(!b.translation?.trim()){info('กรุณาใส่คำแปลไทยก่อนตั้งค่า Gradient Overlay');return}
+ if(strokeModalOpen)closeStrokeModal(false);
  if(view!=='thai'){view='thai';compareOriginal=false;image();draw();bars()}
  const l=b.text_layer||(b.text_layer={});
  gradSnapshot=l.gradient?JSON.parse(JSON.stringify(l.gradient)):null;
@@ -1226,11 +1341,9 @@ function closeGradModal(commit){
   gradDraft.start_color=hexToRgb(gradDraft.stops[0].color);
   gradDraft.end_color=hexToRgb(gradDraft.stops[gradDraft.stops.length-1].color);
   gradDraft.enabled=true;
-  const stroke={
-   enabled:$('stroke')?$('stroke').checked:!!l.stroke?.enabled,
-   color:$('edge')?triplet($('edge').value):(l.stroke?.color||[255,255,255]),
-   size:$('width')?Math.max(1,Math.min(8,+$('width').value)):(l.stroke?.size||3)
-  };
+  const stroke=normalizeStroke(l.stroke);
+  if($('stroke'))stroke.enabled=$('stroke').checked;
+  if($('edge'))stroke.color=triplet($('edge').value);
   const style={stroke,gradient:gradDraft};
   Object.assign(l,style);
   if($('gradient'))$('gradient').checked=true;
@@ -1326,6 +1439,143 @@ gmStopPos.onchange=()=>{
 };
 gmStopDel.onclick=()=>deleteSelectedGradStop();
 
+// === Photoshop Classic Floating Stroke Modal (Mount Once, 60fps) ===
+const strokeModal=$('strokeModal'), strokeHeader=$('strokeHeader'), smClose=$('smClose'), smCancel=$('smCancel'), smOk=$('smOk');
+const smSize=$('smSize'), smSizeNum=$('smSizeNum'), smPosition=$('smPosition'), smBlend=$('smBlend');
+const smOpacity=$('smOpacity'), smOpacityNum=$('smOpacityNum'), smColor=$('smColor'), smColorHex=$('smColorHex');
+
+let strokeModalOpen=false, strokeDraft=null, strokeSnapshot=null;
+let strokePos={x:0,y:0}, strokeWinDrag=null, strokeWinFrame=0;
+
+function scheduleStrokeModalPos(){
+ if(strokeWinFrame)return;
+ strokeWinFrame=requestAnimationFrame(()=>{
+  strokeWinFrame=0;
+  if(!strokeModal||!strokeModalOpen)return;
+  const w=strokeWinDrag?.width??strokeModal.offsetWidth, h=strokeWinDrag?.height??strokeModal.offsetHeight;
+  const x=Math.max(8,Math.min(innerWidth-w-8,strokePos.x));
+  const y=Math.max(8,Math.min(innerHeight-h-8,strokePos.y));
+  strokePos={x,y};
+  strokeModal.style.transform='translate3d('+Math.round(x)+'px,'+Math.round(y)+'px,0)';
+ });
+}
+function applyLiveStrokeOnly(){
+ const b=bubble();
+ if(!b||!strokeDraft)return;
+ const l=b.text_layer||(b.text_layer={});
+ l.stroke=strokeDraft;
+ const node=$('overlay')?.querySelector('.bubble.selected');
+ if(node){
+  const sp=node.querySelector('.txt-fill')||node.querySelector('span');
+  const spStroke=node.querySelector('.txt-stroke');
+  applyLabelEffects(sp,spStroke,l,isTextTransform(b),b.id);
+ }
+ syncInspectorStrokeUi(strokeDraft);
+}
+function applyStrokeModalColor(hexVal){
+ if(!strokeDraft||!hexVal)return;
+ const hexUpper=String(hexVal).toUpperCase(), hexLower=hexUpper.toLowerCase();
+ strokeDraft.color=hexToRgb(hexUpper);
+ if(smColor&&smColor.value!==hexLower)smColor.value=hexLower;
+ if(smColorHex)smColorHex.textContent=hexUpper;
+ applyLiveStrokeOnly();
+}
+function openStrokeModal(){
+ const b=bubble();
+ if(!b||maskEdit)return;
+ if(!b.translation?.trim()){info('กรุณาใส่คำแปลไทยก่อนตั้งค่า Stroke');return}
+ if(gradModalOpen)closeGradModal(false);
+ if(view!=='thai'){view='thai';compareOriginal=false;image();draw();bars()}
+ const l=b.text_layer||(b.text_layer={});
+ strokeSnapshot=l.stroke?JSON.parse(JSON.stringify(l.stroke)):null;
+ strokeDraft=normalizeStroke(l.stroke);
+ strokeDraft.enabled=true;
+ strokeModalOpen=true;
+ lastColorTarget='stroke';
+ const hexUpper=rgbToHexUpper(strokeDraft.color), hexLower=hexUpper.toLowerCase();
+ smSize.value=strokeDraft.size;
+ smSizeNum.value=strokeDraft.size;
+ smPosition.value=strokeDraft.position;
+ smBlend.value=strokeDraft.blend_mode;
+ smOpacity.value=strokeDraft.opacity;
+ smOpacityNum.value=strokeDraft.opacity;
+ smColor.value=hexLower;
+ if(smColorHex)smColorHex.textContent=hexUpper;
+ const rightRect=$('right').getBoundingClientRect();
+ const trigRect=$('openStrokeBtn')?.getBoundingClientRect();
+ const mw=strokeModal.offsetWidth||348, mh=strokeModal.offsetHeight||360;
+ strokePos={
+  x:Math.max(8,rightRect.left-mw-14),
+  y:Math.max(52,Math.min(innerHeight-mh-16,(trigRect?trigRect.top-90:90)))
+ };
+ strokeModal.inert=false;
+ strokeModal.style.transform='translate3d('+Math.round(strokePos.x)+'px,'+Math.round(strokePos.y)+'px,0)';
+ strokeModal.classList.add('visible');
+ if($('stroke'))$('stroke').checked=true;
+ applyLiveStrokeOnly();
+}
+function closeStrokeModal(commit){
+ if(!strokeModalOpen)return;
+ if(eyedropMode==='button'&&eyedropTarget==='stroke')cancelEyedropper();
+ strokeModalOpen=false;
+ strokeWinDrag=null;
+ strokeModal.inert=true;
+ strokeModal.classList.remove('visible');
+ if(altHeld)scheduleLoupeUpdate();
+ const b=bubble();
+ if(!b){strokeDraft=null;strokeSnapshot=null;return}
+ const l=b.text_layer||(b.text_layer={});
+ if(commit&&strokeDraft){
+  const stroke=normalizeStroke({...strokeDraft,enabled:true});
+  const gradient=normalizeGradient(l.gradient);
+  const style={stroke,gradient};
+  Object.assign(l,style);
+  if($('stroke'))$('stroke').checked=true;
+  syncInspectorStrokeUi(stroke);
+  queueEdit({style});run(flush);
+  sidebar();applyLiveBubbleStyle();
+ }else{
+  const restored=strokeSnapshot?normalizeStroke(strokeSnapshot):normalizeStroke(null);
+  l.stroke=restored;
+  if($('stroke'))$('stroke').checked=!!restored.enabled;
+  syncInspectorStrokeUi(restored);
+  applyLiveBubbleStyle();
+ }
+ strokeDraft=null;strokeSnapshot=null;
+}
+
+strokeHeader.onpointerdown=e=>{
+ if(e.button!==0||e.target.closest('button')||!strokeModalOpen)return;
+ const r=strokeModal.getBoundingClientRect();
+ strokeWinDrag={id:e.pointerId,dx:e.clientX-r.left,dy:e.clientY-r.top,width:r.width,height:r.height};
+ strokePos={x:r.left,y:r.top};
+ try{strokeHeader.setPointerCapture(e.pointerId)}catch{}
+ e.preventDefault();
+};
+strokeHeader.onpointermove=e=>{
+ if(!strokeWinDrag||strokeWinDrag.id!==e.pointerId)return;
+ strokePos={x:e.clientX-strokeWinDrag.dx,y:e.clientY-strokeWinDrag.dy};
+ scheduleStrokeModalPos();
+};
+strokeHeader.onpointerup=strokeHeader.onlostpointercapture=()=>{strokeWinDrag=null};
+
+smClose.onclick=()=>closeStrokeModal(false);
+smCancel.onclick=()=>closeStrokeModal(false);
+smOk.onclick=()=>closeStrokeModal(true);
+
+smSize.oninput=()=>{if(!strokeDraft)return;const v=Math.max(1,Math.min(20,Math.round(+smSize.value)));strokeDraft.size=v;smSizeNum.value=v;applyLiveStrokeOnly()};
+smSizeNum.oninput=()=>{if(!strokeDraft)return;const v=Number(smSizeNum.value);if(Number.isFinite(v)&&v>=1&&v<=20){const c=Math.round(v);strokeDraft.size=c;smSize.value=c;applyLiveStrokeOnly()}};
+smSizeNum.onchange=()=>{if(strokeDraft)smSizeNum.value=strokeDraft.size};
+
+smPosition.onchange=()=>{if(!strokeDraft)return;strokeDraft.position=STROKE_POSITIONS.includes(smPosition.value)?smPosition.value:'outside';applyLiveStrokeOnly()};
+smBlend.onchange=()=>{if(!strokeDraft)return;strokeDraft.blend_mode=STROKE_BLEND_MAP[String(smBlend.value||'').toLowerCase()]||'Normal';applyLiveStrokeOnly()};
+
+smOpacity.oninput=()=>{if(!strokeDraft)return;const v=Math.max(0,Math.min(100,Math.round(+smOpacity.value)));strokeDraft.opacity=v;smOpacityNum.value=v;applyLiveStrokeOnly()};
+smOpacityNum.oninput=()=>{if(!strokeDraft)return;const v=Number(smOpacityNum.value);if(Number.isFinite(v)&&v>=0&&v<=100){const c=Math.round(v);strokeDraft.opacity=c;smOpacity.value=c;applyLiveStrokeOnly()}};
+smOpacityNum.onchange=()=>{if(strokeDraft)smOpacityNum.value=strokeDraft.opacity};
+
+smColor.oninput=()=>applyStrokeModalColor(smColor.value);
+
 // === Custom In-App Eyedropper (Offscreen Canvas Pixel Sampler + 60fps Loupe + Alt-Hold) ===
 const eyedropLoupe=$('eyedropLoupe'), edZoom=$('edZoom'), edSwatch=$('edSwatch'), edHex=$('edHex'), edTarget=$('edTarget');
 const edZoomCtx=edZoom?edZoom.getContext('2d',{alpha:false}):null;
@@ -1385,6 +1635,7 @@ function canUseAltEyedropper(targetNode){
 }
 function activeEyedropTarget(){
  if(eyedropMode==='button'&&eyedropTarget)return eyedropTarget;
+ if(strokeModalOpen)return 'stroke';
  if(gradModalOpen)return 'gradient';
  return lastColorTarget==='stroke'?'stroke':'text';
 }
@@ -1407,6 +1658,10 @@ function applyEyedropSample(target,hex,commit=false,flushNow=false){
  }
  if(target==='stroke'){
   lastColorTarget='stroke';
+  if(strokeModalOpen&&strokeDraft){
+   applyStrokeModalColor(hex);
+   return;
+  }
   applyStrokeColor(b,hex,commit,flushNow);
   return;
  }
@@ -1546,6 +1801,7 @@ async function startMaskEdit(){
  cancelEyedropper();
  releaseAltEyedropper();
  if(gradModalOpen)closeGradModal(false);
+ if(strokeModalOpen)closeStrokeModal(false);
  if(!bubble()){info('เลือกกรอบข้อความก่อนแก้ Mask');return}
  await withBusy(async()=>{
   samplingPixel=false;$('maskMethod').value='auto';prevView=view;prevMove=move;compareOriginal=false;move=false;drawFrame=false;maskEdit=true;maskPreviewOn=false;hasMaskPreview=false;
@@ -2099,6 +2355,9 @@ $('maskToggle').onclick=()=>{if(!hasMaskPreview)return;maskPreviewOn=!maskPrevie
 document.onkeydown=e=>{
  if(e.key==='Escape'&&(eyedropMode==='button'||eyedropDrag)){
   e.preventDefault();cancelEyedropper();return;
+ }
+ if(strokeModalOpen){
+  if(e.key==='Escape'){e.preventDefault();closeStrokeModal(false);return}
  }
  if(gradModalOpen){
   if(e.key==='Escape'){e.preventDefault();closeGradModal(false);return}

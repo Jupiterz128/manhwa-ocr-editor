@@ -60,7 +60,7 @@ class SafetyTests(unittest.TestCase):
             self.assertGreater(g['end_color'][1],140)
 
     def test_page_font_and_restore(self):
-        self.assertEqual(effects()['stroke'],dict(enabled=False,color=[255]*3,size=3))
+        self.assertEqual(effects()['stroke'],dict(enabled=False,color=[255]*3,size=3,position='outside',opacity=100,blend_mode='Normal'))
         with tempfile.TemporaryDirectory() as tmp, patch.object(studio,'ROOT',Path(tmp)):
             source=Path(tmp)/'page.png'
             Image.new('RGB',(180,120),'white').save(source)

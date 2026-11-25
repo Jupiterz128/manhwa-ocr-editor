@@ -17,24 +17,36 @@ function applyTextFX(doc, layer, data, photopea) {
         d.putUnitDouble(c("Opct"), c("#Prc"), 100);
         return d;
     }
+    function parseColorRgb(col, fallback) {
+        if (col && typeof col === "object" && typeof col.length === "number" && col.length >= 3) {
+            return [Number(col[0]) || 0, Number(col[1]) || 0, Number(col[2]) || 0];
+        }
+        if (typeof col === "string") {
+            var hex = col.replace(/^#/, "");
+            if (hex.length === 3) hex = hex.charAt(0)+hex.charAt(0)+hex.charAt(1)+hex.charAt(1)+hex.charAt(2)+hex.charAt(2);
+            if (hex.length === 6) return [parseInt(hex.slice(0, 2), 16) || 0, parseInt(hex.slice(2, 4), 16) || 0, parseInt(hex.slice(4, 6), 16) || 0];
+        }
+        return fallback || [255, 255, 255];
+    }
+    var blendMap = { normal: "Nrml", multiply: "Mltp", screen: "Scrn", overlay: "Ovrl" };
     var fx = new ActionDescriptor();
     fx.putUnitDouble(c("Scl "), c("#Prc"), 100);
     if (stroke && stroke.enabled) {
+        var posMap = { outside: "OutF", center: "CtrF", inside: "InsF" };
+        var sPosKey = posMap[String(stroke.position || "outside").toLowerCase()] || "OutF";
+        var sBlendKey = blendMap[String(stroke.blend_mode || "normal").toLowerCase()] || "Nrml";
+        var sOpct = (typeof stroke.opacity === "number") ? Math.max(0, Math.min(100, stroke.opacity)) : 100;
+        var sSize = (typeof stroke.size === "number") ? Math.max(1, Math.min(20, stroke.size)) : 3;
         var s = effect();
-        s.putEnumerated(c("Styl"), c("FStl"), c("OutF"));
+        s.putEnumerated(c("Md  "), c("BlnM"), c(sBlendKey));
+        s.putUnitDouble(c("Opct"), c("#Prc"), sOpct);
+        s.putEnumerated(c("Styl"), c("FStl"), c(sPosKey));
         s.putEnumerated(c("PntT"), c("FrFl"), c("SClr"));
-        s.putUnitDouble(c("Sz  "), c("#Pxl"), stroke.size);
-        s.putObject(c("Clr "), c("RGBC"), rgb(stroke.color));
+        s.putUnitDouble(c("Sz  "), c("#Pxl"), sSize);
+        s.putObject(c("Clr "), c("RGBC"), rgb(parseColorRgb(stroke.color, [255, 255, 255])));
         fx.putObject(c("FrFX"), c("FrFX"), s);
     }
     if (grad && grad.enabled) {
-        function parseStopRgb(col) {
-            if (col instanceof Array && col.length >= 3) return [Number(col[0]) || 0, Number(col[1]) || 0, Number(col[2]) || 0];
-            var hex = String(col || "#FFFFFF").replace(/^#/, "");
-            if (hex.length === 3) hex = hex.charAt(0)+hex.charAt(0)+hex.charAt(1)+hex.charAt(1)+hex.charAt(2)+hex.charAt(2);
-            return [parseInt(hex.slice(0, 2), 16) || 0, parseInt(hex.slice(2, 4), 16) || 0, parseInt(hex.slice(4, 6), 16) || 0];
-        }
-        var blendMap = { normal: "Nrml", multiply: "Mltp", screen: "Scrn", overlay: "Ovrl" };
         var styleMap = { linear: "Lnr ", radial: "Rdl ", reflected: "Rflc" };
         var bKey = blendMap[String(grad.blend_mode || "normal").toLowerCase()] || "Nrml";
         var tKey = styleMap[String(grad.style || "linear").toLowerCase()] || "Lnr ";
@@ -70,7 +82,7 @@ function applyTextFX(doc, layer, data, photopea) {
             var st = sortedStops[i];
             var loc = Math.max(0, Math.min(4096, Math.round(((Number(st.pos) || 0) / 100) * 4096)));
             var stop = new ActionDescriptor();
-            stop.putObject(c("Clr "), c("RGBC"), rgb(parseStopRgb(st.color)));
+            stop.putObject(c("Clr "), c("RGBC"), rgb(parseColorRgb(st.color, [255, 255, 255])));
             stop.putEnumerated(c("Type"), c("Clry"), c("UsrS"));
             stop.putInteger(c("Lctn"), loc);
             stop.putInteger(c("Mdpn"), 50);

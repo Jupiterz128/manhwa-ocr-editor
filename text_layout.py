@@ -2191,7 +2191,8 @@ def composite_text_crop(crop,bubbles,origin):
     for bubble in bubbles:
         if not is_current(bubble):continue
         layer=bubble.text_layer;b=layer['box']
-        pad=8 if (layer.get('stroke') or {}).get('enabled') else 0
+        stroke_cfg=layer.get('stroke') or {}
+        pad=(max(1,min(20,int(stroke_cfg.get('size',3))))+4) if stroke_cfg.get('enabled') else 0
         if b[2]+pad<=x or b[0]-pad>=x+crop.width or b[3]+pad<=y or b[1]-pad>=y+crop.height:continue
         tile=rendered_tile(layer['text'],layer['font_size'],layer.get('font_choice',FONT_NAME))
         if layer.get('color')==[255,255,255]:
