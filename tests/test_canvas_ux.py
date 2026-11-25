@@ -33,6 +33,9 @@ class CanvasUXStaticTests(unittest.TestCase):
         self.assertIn('.handle{position:absolute;width:14px;height:14px;', css)
         self.assertIn('.rot-zone[data-rot=nw]{left:-38px;top:-38px}', css)
         self.assertIn('#viewport.hand,#viewport.hand *{cursor:grab!important}', css)
+        # Text preview layer uses white-space:pre (POINTTEXT parity — never auto-wraps on zoom)
+        self.assertIn('.bubble{position:absolute;pointer-events:auto;white-space:pre;', css)
+        self.assertNotIn('white-space:pre-wrap', css)
 
         # 2. Contextual Task Bar mounted once in exact order: grip, font, color, align, size
         bar_idx = html.index('id="textBar"')
@@ -490,6 +493,147 @@ class CanvasUXBrowserTests(unittest.TestCase):
                         self.assertTrue(tab.locator('.bubble.selected .handle').first.is_visible())
                         text_bar.wait_for(state='visible')
                         print(f'Canvas UX verified: switch avg={switch_stats["avgMs"]:.2f}ms, pan={pan_fps:.1f}fps, eye toggle={toggle_ms:.1f}ms', flush=True)
+
+                        self.assertEqual(errors, [], f'Browser JS errors: {errors}')
+                        ctx.close()
+                        browser.close()
+                finally:
+                    server.should_exit = True
+                    thread.join(10)
+
+    def test_text_line_wrapping_invariant_across_zoom_levels_30_to_180(self):
+        import uvicorn
+        from playwright.sync_api import sync_playwright
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(studio, 'ROOT', Path(tmp) / 'studio'):
+            im = Image.new('RGB', (900, 1400), '#f8fafc')
+            dr = ImageDraw.Draw(im)
+            specs = [
+                ([60, 80, 340, 260], 'NARROW', 'การกลับมาของบรรพชนรุ่นแรกในรอบหนึ่งพันปี'),
+                ([420, 80, 840, 280], 'WIDE', 'เจ้าคิดจริงๆ หรือว่าจะหนีรอดเงื้อมมือของข้าไปได้ง่ายๆ แบบนี้!'),
+                ([120, 380, 400, 620], 'TALL', 'อย่าประมาทศัตรูที่อยู่ตรงหน้าเป็นอันขาด เพราะพลังของมันยังไม่ตื่นขึ้นเต็มที่'),
+                ([460, 420, 740, 560], 'SHORT', 'ไม่มีทาง!'),
+            ]
+            bubbles = []
+            for idx, (box, src, th) in enumerate(specs):
+                dr.rounded_rectangle(box, radius=20, fill='white', outline='#111111', width=4)
+                b = Bubble(box=box, text=src, translation=th, score=0.98)
+                b.text_layer = layout_text(im, b)
+                if idx == 0:
+                    b.text_layer['stroke'] = {
+                        'enabled': True, 'size': 4, 'position': 'outside',
+                        'blend_mode': 'Normal', 'opacity': 100, 'color': [255, 255, 255],
+                    }
+                bubbles.append(b)
+            path = Path(tmp) / 'zoom_wrap.png'
+            im.save(path)
+            key = 'zoomwrap'
+            studio.save(key, 'zoom_wrap.png', [Page(str(path), bubbles)], {})
+            expected_lines = {b.id: len((b.text_layer.get('text') or b.translation).split('\n')) for b in bubbles}
+
+            with socket.socket() as sock:
+                sock.bind(('127.0.0.1', 0))
+                server = uvicorn.Server(uvicorn.Config(studio.app, log_level='warning'))
+                thread = threading.Thread(target=server.run, kwargs={'sockets': [sock]})
+                thread.start()
+                try:
+                    for _ in range(300):
+                        if server.started:
+                            break
+                        time.sleep(0.02)
+                    self.assertTrue(server.started)
+
+                    with sync_playwright() as pw:
+                        browser = pw.chromium.launch()
+                        ctx = browser.new_context(viewport={'width': 1920, 'height': 1080}, device_scale_factor=1)
+                        tab = ctx.new_page()
+                        errors = []
+                        tab.on('pageerror', lambda err: errors.append(str(err)))
+                        tab.add_init_script(f"localStorage.setItem('studio-project','{key}')")
+                        tab.goto(f'http://127.0.0.1:{sock.getsockname()[1]}')
+                        tab.locator('#bid').wait_for()
+                        # Ensure Text view is active
+                        tab.locator('#views button', has_text='Text').click()
+                        tab.wait_for_timeout(80)
+
+                        def set_zoom_to(target_pct):
+                            # Use Alt+Wheel steps or exact zoom buttons, or directly invoke fit/zoom steps
+                            tab.evaluate(
+                                """(pct) => {
+                                  // Trigger wheel zoom or exact zoom via UI zoom buttons until close, then inspect
+                                  const vp = document.getElementById('viewport');
+                                  const st = document.getElementById('stage');
+                                  const getPct = () => parseInt(document.getElementById('percent').textContent, 10);
+                                  let guard = 0;
+                                  while (Math.abs(getPct() - pct) > 4 && guard++ < 60) {
+                                    const dir = getPct() < pct ? -120 : 120;
+                                    const rect = vp.getBoundingClientRect();
+                                    vp.dispatchEvent(new WheelEvent('wheel', {
+                                      deltaY: dir, altKey: true, cancelable: true, bubbles: true,
+                                      clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2,
+                                    }));
+                                  }
+                                }""",
+                                target_pct,
+                            )
+
+                        def measure_bubbles():
+                            return tab.evaluate(
+                                """() => {
+                                  const out = {};
+                                  for (const b of document.querySelectorAll('#overlay .bubble')) {
+                                    const fill = b.querySelector('.txt-fill');
+                                    const stroke = b.querySelector('.txt-stroke');
+                                    const range = document.createRange();
+                                    const lines = [];
+                                    for (const node of fill.childNodes) {
+                                      if (node.nodeType === Node.TEXT_NODE) {
+                                        range.selectNodeContents(node);
+                                        for (const r of range.getClientRects()) {
+                                          if (r.width <= 0.1 || r.height <= 0.1) continue;
+                                          const cy = r.top + r.height / 2;
+                                          if (!lines.some(y => Math.abs(y - cy) < Math.max(2, r.height * 0.45))) {
+                                            lines.push(cy);
+                                          }
+                                        }
+                                      }
+                                    }
+                                    const fr = fill.getBoundingClientRect();
+                                    const sr = stroke.getBoundingClientRect();
+                                    out[b.dataset.id] = {
+                                      whiteSpace: getComputedStyle(b).whiteSpace,
+                                      visualLines: lines.length,
+                                      explicitLines: fill.textContent.split('\\n').length,
+                                      strokeHidden: stroke.hidden,
+                                      boxDelta: stroke.hidden ? 0 : Math.max(
+                                        Math.abs(fr.left - sr.left),
+                                        Math.abs(fr.top - sr.top),
+                                        Math.abs(fr.width - sr.width),
+                                        Math.abs(fr.height - sr.height)
+                                      ),
+                                    };
+                                  }
+                                  return {
+                                    pct: parseInt(document.getElementById('percent').textContent, 10),
+                                    bubbles: out,
+                                  };
+                                }"""
+                            )
+
+                        for target_pct in (30, 45, 65, 85, 100, 140, 180):
+                            set_zoom_to(target_pct)
+                            tab.wait_for_timeout(30)
+                            snap = measure_bubbles()
+                            self.assertLessEqual(abs(snap['pct'] - target_pct), 6, f'Failed to reach {target_pct}%: got {snap["pct"]}%')
+                            for bid, exp_n in expected_lines.items():
+                                info_b = snap['bubbles'][bid]
+                                self.assertEqual(info_b['whiteSpace'], 'pre', f'At {snap["pct"]}%: {info_b}')
+                                self.assertEqual(info_b['explicitLines'], exp_n)
+                                self.assertEqual(
+                                    info_b['visualLines'], exp_n,
+                                    f'Line wrap changed at {snap["pct"]}% for {bid}: visual={info_b["visualLines"]} != expected={exp_n}',
+                                )
+                                self.assertLess(info_b['boxDelta'], 0.5, f'Fill/stroke mismatch at {snap["pct"]}%: {info_b}')
 
                         self.assertEqual(errors, [], f'Browser JS errors: {errors}')
                         ctx.close()

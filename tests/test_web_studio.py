@@ -319,12 +319,61 @@ class StudioPersistenceTests(unittest.TestCase):
             self.assertTrue((exp_dir / 'ep01.mtp').is_file())
             self.assertEqual(prog['paths'], [str((exp_dir / 'ep01.mtp').resolve())])
 
-            # 8) Reveal in Windows Explorer uses /select,<path>
+            # 8) Reveal in Windows Explorer uses /select,"<norm_path>" for files and os.startfile for folders
             with patch('web_api.subprocess.Popen') as popen:
                 rv = studio.reveal_path({'path': str(txt_out)})
             self.assertTrue(rv['ok'])
             if os.name == 'nt':
-                popen.assert_called_once_with(['explorer', f'/select,{str(txt_out.resolve())}'])
+                expected_txt = os.path.normpath(str(txt_out.resolve()))
+                popen.assert_called_once_with(f'explorer /select,"{expected_txt}"')
+
+    def test_reveal_in_explorer_thai_spaces_and_parentheses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            thai_dir = Path(tmp) / 'แปลกาตูน' / 'กาตูนจีน' / '(ชั่วคราว) การกลับมาของบรรพชนรุ่นแรก_ปีต่อมา ตอนที่ 66'
+            thai_dir.mkdir(parents=True, exist_ok=True)
+            thai_file = thai_dir / 'ตอนที่ 66 (หน้า 01).psd'
+            thai_file.write_bytes(b'8BPS')
+            missing_file = thai_dir / 'deleted_file (1).psd'
+            missing_tree = Path(tmp) / 'ไม่มีโฟลเดอร์นี้' / 'missing.psd'
+
+            norm_dir = os.path.normpath(str(thai_dir.resolve()))
+            norm_file = os.path.normpath(str(thai_file.resolve()))
+            forward_dir = str(thai_dir).replace('\\', '/')
+            forward_file = str(thai_file).replace('\\', '/')
+
+            # 1) Folder with Thai, spaces, parentheses (even with forward slashes) -> os.startfile(norm_dir)
+            with patch('web_api.os.startfile', create=True) as startfile, \
+                 patch('web_api.subprocess.Popen') as popen:
+                res_dir = studio.reveal_path({'path': forward_dir})
+            self.assertTrue(res_dir['ok'])
+            self.assertEqual(res_dir['path'], norm_dir)
+            if os.name == 'nt':
+                startfile.assert_called_once_with(norm_dir)
+                popen.assert_not_called()
+
+            # 2) File inside Thai/spaces/parentheses folder -> explorer /select,"<norm_file>"
+            with patch('web_api.os.startfile', create=True) as startfile, \
+                 patch('web_api.subprocess.Popen') as popen:
+                res_file = studio.reveal_path({'path': forward_file})
+            self.assertTrue(res_file['ok'])
+            self.assertEqual(res_file['path'], norm_file)
+            if os.name == 'nt':
+                popen.assert_called_once_with(f'explorer /select,"{norm_file}"')
+                startfile.assert_not_called()
+
+            # 3) Missing file inside existing Thai/spaces/parentheses folder -> fallback os.startfile(parent)
+            with patch('web_api.os.startfile', create=True) as startfile, \
+                 patch('web_api.subprocess.Popen') as popen:
+                res_fallback = studio.reveal_path({'path': str(missing_file)})
+            self.assertTrue(res_fallback['ok'])
+            self.assertEqual(res_fallback['path'], norm_dir)
+            if os.name == 'nt':
+                startfile.assert_called_once_with(norm_dir)
+                popen.assert_not_called()
+
+            # 4) Completely non-existent path & parent -> raises ValueError
+            with self.assertRaises(ValueError):
+                studio.reveal_path({'path': str(missing_tree)})
 
     def test_font_presets_crud_apply_and_open_txt(self):
         import text_layout as tl

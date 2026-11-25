@@ -174,19 +174,27 @@ def _pick_folder_path(title='เลือกโฟลเดอร์ปลาย
         root.destroy()
 
 
-def _reveal_in_explorer(target: Path):
-    target = Path(target).resolve()
-    if not target.exists():
-        if target.parent.exists():
-            target = target.parent
+def _reveal_in_explorer(target: Path | str):
+    norm = os.path.normpath(str(Path(target).resolve()))
+    if not os.path.exists(norm):
+        parent = os.path.dirname(norm)
+        if parent and os.path.isdir(parent):
+            norm = parent
         else:
-            raise ValueError(f'ไม่พบไฟล์หรือโฟลเดอร์: {target}')
+            raise ValueError(f'ไม่พบไฟล์หรือโฟลเดอร์: {norm}')
     if os.name == 'nt':
-        if target.is_file():
-            subprocess.Popen(['explorer', f'/select,{str(target)}'])
+        if os.path.isdir(norm):
+            os.startfile(norm)
+        elif os.path.isfile(norm):
+            subprocess.Popen(f'explorer /select,"{norm}"')
         else:
-            subprocess.Popen(['explorer', str(target)])
-    return str(target)
+            parent = os.path.dirname(norm)
+            if parent and os.path.isdir(parent):
+                os.startfile(parent)
+                norm = parent
+            else:
+                raise ValueError(f'ไม่พบไฟล์หรือโฟลเดอร์: {norm}')
+    return norm
 
 
 def get_ocr_cache():
