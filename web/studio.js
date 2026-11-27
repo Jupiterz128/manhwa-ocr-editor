@@ -235,7 +235,7 @@ function syncCompareButton(){
   b.classList.toggle('active',on);
   b.setAttribute('aria-pressed',on?'true':'false');
   b.dataset.state=on?'on':'off';
-  b.title=on?'ปิดตา: กลับสู่ภาพคลีน + Text + เส้นกรอบ (กด 0 เพื่อ Fit)':'เปิดตา: ดูเทียบ Text กับภาพต้นฉบับ (กด 0 เพื่อ Fit)';
+  b.title=on?'ปิดตา: กลับสู่ภาพคลีน + Text + เส้นกรอบ (Tab · กด 0 เพื่อ Fit)':'เปิดตา: ดูเทียบ Text กับภาพต้นฉบับ (Tab · กด 0 เพื่อ Fit)';
  }
  $('artOrig')?.classList.toggle('visible',on);
  $('overlay')?.classList.toggle('compare-mode',on);
@@ -507,7 +507,7 @@ tbSize.onchange=()=>{
  applyTypographySize(b,tbSize.value,true,tbSizeBefore);
  tbSizeBefore=null;
 };
-tbSize.onkeydown=e=>{if(e.key==='Enter'){tbSize.blur()}};
+tbSize.onkeydown=e=>{const c=shortcutCode(e);if(c==='Enter'||c==='NumpadEnter'){tbSize.blur()}};
 tbSizeDec.onclick=e=>{
  const b=bubble();if(!b)return;
  const before=captureTransform(b), cur=Math.round((b.text_layer||{}).font_size||24);
@@ -1958,7 +1958,7 @@ async function cancelMaskEdit(silent=false){
  await strokeWrites.catch(()=>{});strokeWrites=Promise.resolve();
  if(!maskEdit)return;
  const bid=id;
- maskEdit=false;maskPreviewOn=false;hasMaskPreview=false;view=prevView||view;move=prevMove;
+ maskEdit=false;maskPreviewOn=false;hasMaskPreview=false;compareOriginal=false;view='thai';move=prevMove;
  try{if(key&&bid)await api(key+'/page/'+n+'/mask_cancel',{id:bid})}catch{}
  revision++;refresh();if(!silent)info('ยกเลิกการแก้ Mask แล้ว')
 }
@@ -1967,7 +1967,7 @@ async function applyMaskEdit(){
  if(!maskEdit||!bubble())return;
  await withBusy(async()=>{
   const res=await api(key+'/page/'+n+'/mask_apply',{id,method:$('maskMethod').value,color:$('maskMethod').value==='solid'?triplet($('solidColor').value):null});
-  pages[n]=res.page;maskEdit=false;maskPreviewOn=false;hasMaskPreview=false;view='clean';
+  pages[n]=res.page;maskEdit=false;maskPreviewOn=false;hasMaskPreview=false;compareOriginal=false;view='thai';move=prevMove;
   revision++;refresh();info(res.note)
  },'กำลังบันทึกผล Clean…')
 }
@@ -2343,7 +2343,7 @@ const commands={
  eyedropText:['ดูดสีข้อความจากภาพ (Eyedropper)',()=>toggleButtonEyedropper('text'),''],
  eyedropStroke:['ดูดสี Stroke จากภาพ (หรือ Alt+Click ในหน้าต่างสี)',()=>toggleButtonEyedropper('stroke'),'Alt+Click'],
  fit:['ซูมพอดีหน้า (Fit)',()=>{fit();draw()},'0'],
- compareOriginal:['เทียบภาพต้นฉบับ + Text (เปิด/ปิดตา)',toggleCompareOriginal,''],
+ compareOriginal:['เทียบภาพต้นฉบับ + Text (เปิด/ปิดตา)',toggleCompareOriginal,'Tab'],
  left:['ซ่อน/แสดงแถบซ้าย',()=>side('left'),'['],
  right:['ซ่อน/แสดง Inspector',()=>side('right'),']'],
  export:['ส่งออก PSD / MTP',exportModal,''],
@@ -2366,7 +2366,7 @@ function palette(){
   }
  }
  input.oninput=filter;
- input.onkeydown=e=>{if(e.key==='Enter')list.firstChild?.click();if(e.key==='ArrowDown')list.firstChild?.focus()};
+ input.onkeydown=e=>{const c=shortcutCode(e);if(c==='Enter'||c==='NumpadEnter')list.firstChild?.click();if(c==='ArrowDown')list.firstChild?.focus()};
  filter();input.focus()
 }
 function openOcrModal(){
@@ -2535,42 +2535,92 @@ $('brush').onclick=()=>{erase=false;bars()};
 $('eraser').onclick=()=>{erase=true;bars()};
 $('radius').oninput=()=>{$('radiusValue').value=$('radius').value;updateCursor()};
 $('maskToggle').onclick=()=>{if(!hasMaskPreview)return;maskPreviewOn=!maskPreviewOn;image();bars()};
+const KEY_TO_CODE={
+ v:'KeyV',m:'KeyM',n:'KeyN',t:'KeyT',z:'KeyZ',y:'KeyY',s:'KeyS',k:'KeyK',
+ '0':'Digit0','1':'Digit1','2':'Digit2','3':'Digit3',
+ '[':'BracketLeft',']':'BracketRight','=':'Equal','-':'Minus','+':'NumpadAdd',
+ ' ':'Space',tab:'Tab',delete:'Delete',backspace:'Backspace',escape:'Escape',enter:'Enter',
+ arrowleft:'ArrowLeft',arrowright:'ArrowRight',arrowup:'ArrowUp',arrowdown:'ArrowDown',
+ alt:'AltLeft'
+};
+const SINGLE_KEY_COMMANDS={
+ Digit1:'ocrOptions',
+ Digit2:'batchMask',
+ Digit3:'batchClean',
+ KeyV:'move',
+ KeyN:'addFrame',
+ KeyM:'maskEdit',
+ KeyT:'txtModal',
+ Digit0:'fit',
+ Numpad0:'fit',
+ BracketLeft:'left',
+ BracketRight:'right'
+};
+function shortcutCode(e){
+ if(e?.code)return e.code;
+ const k=typeof e?.key==='string'?e.key:'';
+ return KEY_TO_CODE[k.toLowerCase()]||k;
+}
+function isEditableTarget(node){
+ const elNode=(node&&node.nodeType===1)?node:node?.parentElement;
+ if(!elNode)return false;
+ if(elNode.isContentEditable)return true;
+ return !!(elNode.closest&&elNode.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"])'));
+}
+function isEditingContext(e){
+ if(isEditableTarget(e?.target))return true;
+ const active=document.activeElement;
+ if(active&&active!==document.body&&active!==document.documentElement&&isEditableTarget(active))return true;
+ return false;
+}
 document.onkeydown=e=>{
- if(e.key==='Escape'&&(eyedropMode==='button'||eyedropDrag)){
+ const code=shortcutCode(e);
+ const mod=e.ctrlKey||e.metaKey;
+ const editing=isEditingContext(e);
+ if(code==='Escape'&&(eyedropMode==='button'||eyedropDrag)){
   e.preventDefault();cancelEyedropper();return;
  }
  if(strokeModalOpen){
-  if(e.key==='Escape'){e.preventDefault();closeStrokeModal(false);return}
+  if(code==='Escape'){e.preventDefault();closeStrokeModal(false);return}
  }
  if(gradModalOpen){
-  if(e.key==='Escape'){e.preventDefault();closeGradModal(false);return}
-  if(e.key==='Delete'||e.key==='Backspace'){
-   if(!e.target?.closest?.('input[type=number],input[type=text],textarea')){
+  if(code==='Escape'){e.preventDefault();closeGradModal(false);return}
+  if(code==='Delete'||code==='Backspace'){
+   if(!e.target?.closest?.('input[type=number],input[type=text],textarea,[contenteditable]:not([contenteditable="false"])')){
     e.preventDefault();deleteSelectedGradStop();
    }
    return
   }
  }
- if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();palette();return}
- if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){e.preventDefault();run(()=>saveProjectJson(e.shiftKey));return}
- if($('dialog').open||e.target?.closest?.('input,textarea,select'))return;
- if((e.ctrlKey||e.metaKey)&&!e.altKey){
-  const k=e.key.toLowerCase();
-  if(k==='0'){e.preventDefault();fit();draw();return}
-  if(k==='z'&&!e.shiftKey){e.preventDefault();run(maskEdit?undoMaskEdit:performUndo);return}
-  if(k==='y'||(k==='z'&&e.shiftKey)){e.preventDefault();if(!maskEdit)run(performRedo);return}
- }
- if(e.key==='Escape'){
+ if(mod&&!e.altKey&&code==='KeyK'){e.preventDefault();palette();return}
+ if(mod&&!e.altKey&&code==='KeyS'){e.preventDefault();run(()=>saveProjectJson(e.shiftKey));return}
+ if($('dialog').open)return;
+ if(code==='Escape'){
   if(drawFrame){e.preventDefault();drawFrame=false;bars();draw();info('');return}
   if(maskEdit){e.preventDefault();run(()=>cancelMaskEdit());return}
  }
- if(e.key==='Delete'){e.preventDefault();run(commands.deleteFrame[1]);return}
- let c={'1':'ocrOptions','2':'batchMask','3':'batchClean','v':'move','n':'addFrame','m':'maskEdit','t':'txtModal','0':'fit','[':'left',']':'right'}[e.key.toLowerCase()];
- if(c&&!e.ctrlKey&&!e.metaKey&&!e.altKey){e.preventDefault();run(commands[c][1]);return}
- if(move&&!maskEdit&&bubble()&&e.key.startsWith('Arrow')){
+ if(editing)return;
+ if(code==='Tab'&&!mod&&!e.altKey&&!e.shiftKey){
+  if(!gradModalOpen&&!strokeModalOpen&&page()&&!maskEdit){
+   e.preventDefault();
+   if(!e.repeat)toggleCompareOriginal();
+   return;
+  }
+ }
+ if(mod&&!e.altKey){
+  if(code==='Digit0'||code==='Numpad0'){e.preventDefault();fit();draw();return}
+  if(code==='Equal'||code==='NumpadAdd'){e.preventDefault();scale(zoom*1.2);return}
+  if(code==='Minus'||code==='NumpadSubtract'){e.preventDefault();scale(zoom*.83);return}
+  if(code==='KeyZ'&&!e.shiftKey){e.preventDefault();run(maskEdit?undoMaskEdit:performUndo);return}
+  if(code==='KeyY'||(code==='KeyZ'&&e.shiftKey)){e.preventDefault();if(!maskEdit)run(performRedo);return}
+ }
+ if(code==='Delete'&&!mod&&!e.altKey){e.preventDefault();run(commands.deleteFrame[1]);return}
+ let c=SINGLE_KEY_COMMANDS[code];
+ if(c&&!mod&&!e.altKey){e.preventDefault();run(commands[c][1]);return}
+ if(move&&!maskEdit&&bubble()&&(code==='ArrowLeft'||code==='ArrowRight'||code==='ArrowUp'||code==='ArrowDown')){
   e.preventDefault();
   let before=captureTransform(bubble());
-  let dx=({ArrowLeft:-1,ArrowRight:1}[e.key]||0)*(e.shiftKey?5:1),dy=({ArrowUp:-1,ArrowDown:1}[e.key]||0)*(e.shiftKey?5:1);
+  let dx=({ArrowLeft:-1,ArrowRight:1}[code]||0)*(e.shiftKey?5:1),dy=({ArrowUp:-1,ArrowDown:1}[code]||0)*(e.shiftKey?5:1);
   if(isTextTransform(bubble())){
    const moved=bounds(bubble()).map((v,i)=>v+(i%2?dy:dx));
    layer().editor_box=moved;
@@ -2600,16 +2650,18 @@ document.addEventListener('contextmenu',e=>{
  if(eyedropMode==='button'||eyedropDrag){e.preventDefault();cancelEyedropper()}
 });
 function isTypingField(node){
- if(!node||!node.closest)return false;
- if(node.isContentEditable)return true;
- const field=node.closest('textarea,input');
+ const elNode=(node&&node.nodeType===1)?node:node?.parentElement;
+ if(!elNode)return false;
+ if(elNode.isContentEditable)return true;
+ const field=elNode.closest?.('textarea,input,select,[contenteditable]:not([contenteditable="false"])');
  if(!field)return false;
- if(field.tagName==='TEXTAREA')return true;
+ if(field.tagName==='TEXTAREA'||field.tagName==='SELECT'||field.isContentEditable)return true;
  const t=(field.type||'text').toLowerCase();
  return !['button','checkbox','radio','range','color','file','submit','reset'].includes(t);
 }
 document.addEventListener('keydown',e=>{
- if((e.key==='Alt'||e.code==='AltLeft'||e.code==='AltRight')&&!e.ctrlKey&&!e.metaKey){
+ const code=shortcutCode(e);
+ if((e.key==='Alt'||code==='AltLeft'||code==='AltRight')&&!e.ctrlKey&&!e.metaKey){
   if(!$('dialog').open)e.preventDefault();
   if(!altHeld&&canUseAltEyedropper(e.target)){
    altHeld=true;altPicked=false;altPickedTarget=null;altLastHex='';
@@ -2618,7 +2670,7 @@ document.addEventListener('keydown',e=>{
   }
   return;
  }
- if(e.code==='Space'&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&!$('dialog').open&&!!page()&&!isTypingField(e.target)){
+ if(code==='Space'&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&!$('dialog').open&&!!page()&&!isTypingField(e.target)&&!(e.target===document&&isTypingField(document.activeElement))){
   e.preventDefault();
   if(!spaceHeld){
    if(maskEdit&&drag?.kind==='maskPaint'&&cursorPoint){
@@ -2647,11 +2699,12 @@ function releaseHand(resume){
  if(isEyedropperActive())scheduleLoupeUpdate();
 }
 document.addEventListener('keyup',e=>{
- if(e.key==='Alt'||e.code==='AltLeft'||e.code==='AltRight'){
+ const code=shortcutCode(e);
+ if(e.key==='Alt'||code==='AltLeft'||code==='AltRight'){
   if(!$('dialog').open)e.preventDefault();
   releaseAltEyedropper();
  }
- if(e.code==='Space'){
+ if(code==='Space'){
   if(spaceHeld)e.preventDefault();
   releaseHand(true);
  }

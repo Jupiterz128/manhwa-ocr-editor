@@ -53,13 +53,80 @@ class CanvasUXStaticTests(unittest.TestCase):
         self.assertTrue(grip_idx < font_idx < color_idx < align_idx < size_idx)
         self.assertIn('#textBar.dragging-hide', css)
 
-        # 3. Fit button in bottom toolbar replaced by eye compare toggle; Fit kept in commands & '0' shortcut
+        # 3. Fit button in bottom toolbar replaced by eye compare toggle; Fit kept in commands & Digit0 shortcut
         tools_slice = html[html.index('class="float tools"'):html.index('</article>')]
         self.assertNotIn('data-cmd="fit"', tools_slice)
         self.assertIn('id="compareBtn"', tools_slice)
         self.assertIn('data-cmd="compareOriginal"', tools_slice)
-        self.assertIn("'0':'fit'", js)
+        self.assertIn('(Tab', tools_slice)
+        self.assertIn("Digit0:'fit'", js)
         self.assertIn("fit:['ซูมพอดีหน้า (Fit)'", js)
+        self.assertIn("compareOriginal:['เทียบภาพต้นฉบับ + Text (เปิด/ปิดตา)',toggleCompareOriginal,'Tab']", js)
+
+        # 4. Mask exit always returns to Text ('thai') view on both applyMaskEdit and cancelMaskEdit
+        cancel_fn = js[js.index('async function cancelMaskEdit'):js.index('async function applyMaskEdit')]
+        apply_fn = js[js.index('async function applyMaskEdit'):js.index('async function previewMaskEdit')]
+        self.assertIn("view='thai'", cancel_fn)
+        self.assertIn("view='thai'", apply_fn)
+        self.assertNotIn("view='clean'", apply_fn)
+
+        # 5. Layout-independent shortcuts via event.code (works on Thai Kedmanee/Pattachote) + editable guards
+        for token in (
+            'function shortcutCode(',
+            'function isEditableTarget(',
+            'function isEditingContext(',
+            "KeyV:'move'",
+            "KeyM:'maskEdit'",
+            "KeyN:'addFrame'",
+            "KeyT:'txtModal'",
+            "BracketLeft:'left'",
+            "BracketRight:'right'",
+            "code==='Tab'",
+            "code==='KeyK'",
+            "code==='KeyS'",
+            "code==='KeyZ'",
+            "code==='KeyY'",
+            "code==='Delete'",
+            "code==='Escape'",
+            "code==='Space'",
+            'isContentEditable',
+        ):
+            self.assertIn(token, js)
+
+    def test_mask_apply_thai_view_image_not_cached_and_freshly_cleaned(self):
+        import io
+        import numpy as np
+
+        im = Image.new('RGB', (400, 300), '#9fb3c8')
+        d = ImageDraw.Draw(im)
+        d.ellipse((40, 40, 360, 260), fill='white', outline='#111111', width=4)
+        d.rectangle((140, 125, 260, 175), fill='#dc2626')
+        b = Bubble(
+            box=[40, 40, 360, 260],
+            text='TEST',
+            translation='ทดสอบคลีน',
+            lines=[{'box': [140, 125, 260, 175], 'text': 'TEST'}],
+            score=0.96,
+        )
+        with tempfile.TemporaryDirectory() as tmp, patch.object(studio, 'ROOT', Path(tmp)):
+            src = Path(tmp) / '01.png'
+            im.save(src)
+            studio.save('nocachejob', '01.png', [Page(str(src), [b])], {})
+
+            before_resp = studio.image('nocachejob', 0, view='thai')
+            self.assertEqual(before_resp.headers.get('cache-control'), 'no-store')
+            before_arr = np.asarray(Image.open(io.BytesIO(before_resp.body)).convert('RGB'))
+            self.assertGreater(int(before_arr[150, 200, 0]), 180)
+            self.assertLess(int(before_arr[150, 200, 1]), 80)
+
+            studio.action('nocachejob', 0, 'mask_start', {'id': b.id})
+            studio.action('nocachejob', 0, 'mask_paint', {'id': b.id, 'points': [[145, 150], [255, 150]], 'radius': 24, 'erase': False})
+            studio.action('nocachejob', 0, 'mask_apply', {'id': b.id, 'method': 'solid', 'color': [255, 255, 255]})
+
+            after_resp = studio.image('nocachejob', 0, view='thai')
+            self.assertEqual(after_resp.headers.get('cache-control'), 'no-store')
+            after_arr = np.asarray(Image.open(io.BytesIO(after_resp.body)).convert('RGB'))
+            self.assertGreater(int(after_arr[135:165, 150:250].min()), 240)
 
 
 @unittest.skipUnless(os.getenv('TEST_STUDIO_BROWSER') == '1', 'requires Chromium')
@@ -825,6 +892,341 @@ class CanvasUXBrowserTests(unittest.TestCase):
                 f'max|Web-Comp|=({max_dx_comp:.2f},{max_dy_comp:.2f})px, zoomed max|dy|={max_dy_zoom:.2f}px',
                 flush=True,
             )
+
+    def test_mask_exit_to_text_tab_eye_toggle_and_thai_layout_shortcuts(self):
+        import uvicorn
+        from playwright.sync_api import sync_playwright
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(studio, 'ROOT', Path(tmp) / 'studio'):
+            root = Path(tmp)
+            im = Image.new('RGB', (720, 960), '#1f2937')
+            dr = ImageDraw.Draw(im)
+            box1 = [80, 100, 420, 280]
+            box2 = [120, 380, 520, 560]
+            dr.rounded_rectangle(box1, radius=24, fill='white', outline='#111111', width=4)
+            dr.rectangle((190, 165, 310, 215), fill='#dc2626')
+            dr.rounded_rectangle(box2, radius=24, fill='white', outline='#111111', width=4)
+            dr.rectangle((240, 445, 400, 495), fill='#2563eb')
+            path = root / 'ux3.png'
+            im.save(path)
+
+            b1 = Bubble(box=box1, text='RED', translation='บอลลูนทดสอบหนึ่ง', score=0.98, lines=[{'box': [190, 165, 310, 215]}])
+            b1.text_layer = layout_text(im, b1)
+            b2 = Bubble(box=box2, text='BLUE', translation='บอลลูนทดสอบสอง', score=0.97, lines=[{'box': [240, 445, 400, 495]}])
+            b2.text_layer = layout_text(im, b2)
+            key = 'ux3key'
+            studio.save(key, 'ux3.png', [Page(str(path), [b1, b2])], {})
+
+            with socket.socket() as sock:
+                sock.bind(('127.0.0.1', 0))
+                server = uvicorn.Server(uvicorn.Config(studio.app, log_level='warning'))
+                thread = threading.Thread(target=server.run, kwargs={'sockets': [sock]})
+                thread.start()
+                try:
+                    for _ in range(300):
+                        if server.started:
+                            break
+                        time.sleep(0.02)
+                    self.assertTrue(server.started)
+
+                    with sync_playwright() as pw:
+                        browser = pw.chromium.launch()
+                        for ratio in (1, 1.25):
+                            with self.subTest(scale=ratio):
+                                vw, vh = round(1920 / ratio), round(1080 / ratio)
+                                ctx = browser.new_context(viewport={'width': vw, 'height': vh}, device_scale_factor=ratio)
+                                tab = ctx.new_page()
+                                errors = []
+                                tab.on('pageerror', lambda err: errors.append(str(err)))
+                                tab.add_init_script(f"localStorage.setItem('studio-project','{key}')")
+                                tab.goto(f'http://127.0.0.1:{sock.getsockname()[1]}')
+                                tab.locator('#bid').wait_for()
+                                tab.wait_for_function("document.getElementById('art').complete && document.getElementById('art').naturalWidth === 720")
+
+                                # 0) UI must not overflow 1920x1080 at 100% or 125% scaling
+                                self.assertTrue(
+                                    tab.evaluate('document.documentElement.scrollWidth===innerWidth && document.documentElement.scrollHeight===innerHeight'),
+                                    f'UI overflowed at scale {ratio}',
+                                )
+                                clipped = tab.evaluate(
+                                    """() => {
+                                      const bad = [];
+                                      for (const sel of ['header button', '#topBar button', '.tools button']) {
+                                        for (const el of document.querySelectorAll(sel)) {
+                                          if (el.offsetParent === null) continue;
+                                          const r = el.getBoundingClientRect();
+                                          if (r.width < 10 || r.left < 0 || r.right > window.innerWidth + 0.5 || r.top < 0 || r.bottom > window.innerHeight + 0.5)
+                                            bad.push({text: el.textContent.trim(), id: el.id, r});
+                                        }
+                                      }
+                                      return bad;
+                                    }"""
+                                )
+                                self.assertEqual(clipped, [], f'Clipped buttons at scale {ratio}: {clipped}')
+
+                                def active_view_label():
+                                    return tab.evaluate("document.querySelector('#views button.active')?.textContent?.trim() || ''")
+
+                                def sample_art_rgb(ix, iy):
+                                    return tab.evaluate(
+                                        """async ([ix, iy]) => {
+                                          const img = document.getElementById('art');
+                                          if (!img.complete || !img.naturalWidth) {
+                                            await new Promise(res => {
+                                              img.addEventListener('load', res, { once: true });
+                                              img.addEventListener('error', res, { once: true });
+                                            });
+                                          }
+                                          if (img.decode) await img.decode().catch(() => {});
+                                          const c = document.createElement('canvas');
+                                          c.width = img.naturalWidth; c.height = img.naturalHeight;
+                                          const ctx = c.getContext('2d');
+                                          ctx.drawImage(img, 0, 0);
+                                          const d = ctx.getImageData(ix, iy, 1, 1).data;
+                                          return [d[0], d[1], d[2]];
+                                        }""",
+                                        [ix, iy],
+                                    )
+
+                                def dispatch_thai_key(thai_key, code, ctrl=False, shift=False, target_sel=None):
+                                    return tab.evaluate(
+                                        """([key, code, ctrlKey, shiftKey, targetSel]) => {
+                                          const target = targetSel ? document.querySelector(targetSel) : document;
+                                          const ev = new KeyboardEvent('keydown', {
+                                            key, code, ctrlKey, shiftKey, bubbles: true, cancelable: true
+                                          });
+                                          target.dispatchEvent(ev);
+                                          return ev.defaultPrevented;
+                                        }""",
+                                        [thai_key, code, ctrl, shift, target_sel],
+                                    )
+
+                                # === 1) Mask Edit exit always returns to Text view (Cancel, Esc, M toggle, Apply) ===
+                                # 1a) From คลีน view -> M -> Cancel button -> Text view
+                                tab.locator('#views button', has_text='คลีน').click()
+                                self.assertEqual(active_view_label(), 'คลีน')
+                                tab.keyboard.press('m')
+                                tab.locator('#cleanPanel').wait_for(state='visible')
+                                tab.locator('[data-cmd=maskCancel]').click()
+                                tab.locator('#cleanPanel').wait_for(state='hidden')
+                                self.assertEqual(active_view_label(), 'Text')
+
+                                # 1b) From ต้นฉบับ view -> M -> Esc -> Text view
+                                tab.locator('#views button', has_text='ต้นฉบับ').click()
+                                self.assertEqual(active_view_label(), 'ต้นฉบับ')
+                                tab.keyboard.press('m')
+                                tab.locator('#cleanPanel').wait_for(state='visible')
+                                tab.keyboard.press('Escape')
+                                tab.locator('#cleanPanel').wait_for(state='hidden')
+                                self.assertEqual(active_view_label(), 'Text')
+
+                                # 1c) From คลีน view -> M -> M again (using Thai key 'ท' + code 'KeyM') -> Text view
+                                tab.locator('#views button', has_text='คลีน').click()
+                                self.assertEqual(active_view_label(), 'คลีน')
+                                dispatch_thai_key('ท', 'KeyM')
+                                tab.locator('#cleanPanel').wait_for(state='visible')
+                                dispatch_thai_key('ท', 'KeyM')
+                                tab.locator('#cleanPanel').wait_for(state='hidden')
+                                self.assertEqual(active_view_label(), 'Text')
+
+                                # 1d) Paint -> Preview (stays in mask_preview) -> Apply (ตกลง) -> Text view with fresh cleaned background
+                                if ratio == 1:
+                                    # Before cleaning, center of b1 (250, 190) has red ink (#dc2626)
+                                    rgb_before = sample_art_rgb(250, 190)
+                                    self.assertGreater(rgb_before[0], 180)
+                                    self.assertLess(rgb_before[1], 80)
+
+                                    tab.locator('#views button', has_text='คลีน').click()
+                                    tab.keyboard.press('m')
+                                    tab.locator('#cleanPanel').wait_for(state='visible')
+                                    tab.wait_for_function("document.querySelector('#paint').dataset.ready==='yes'")
+                                    # Use solid white method for fast deterministic clean test
+                                    tab.locator('#maskOptions details summary').click()
+                                    tab.locator('#maskMethod').select_option('solid')
+                                    tab.locator('#solidColor').fill('#ffffff')
+                                    sel_bb = tab.locator('.bubble.selected').bounding_box()
+                                    tab.mouse.move(sel_bb['x'] + sel_bb['width'] * 0.35, sel_bb['y'] + sel_bb['height'] * 0.5)
+                                    tab.mouse.down()
+                                    tab.mouse.move(sel_bb['x'] + sel_bb['width'] * 0.65, sel_bb['y'] + sel_bb['height'] * 0.5, steps=4)
+                                    tab.mouse.up()
+                                    tab.wait_for_function("strokeWrites.then(()=>true)")
+
+                                    # Preview stays in mask mode showing mask_preview (not Text yet)
+                                    with tab.expect_response(lambda r: r.url.endswith('/mask_preview') and r.ok):
+                                        tab.locator('[data-cmd=maskPreview]').click()
+                                    tab.locator('#maskToggle').wait_for(state='visible')
+                                    self.assertIn('view=mask_preview', tab.locator('#art').get_attribute('src') or '')
+                                    self.assertEqual(active_view_label(), '')
+
+                                    # Click ตกลง (Apply) -> exits to Text view & refreshes #art immediately (no stale cache!)
+                                    src_before_apply = tab.locator('#art').get_attribute('src') or ''
+                                    with tab.expect_response(lambda r: '/image/' in r.url and 'view=thai' in r.url and r.ok) as img_resp_info:
+                                        tab.locator('[data-cmd=maskApply]').click()
+                                    tab.locator('#cleanPanel').wait_for(state='hidden')
+                                    self.assertEqual(img_resp_info.value.headers.get('cache-control'), 'no-store')
+                                    self.assertEqual(active_view_label(), 'Text')
+                                    src_after_apply = tab.locator('#art').get_attribute('src') or ''
+                                    self.assertIn('view=thai', src_after_apply)
+                                    self.assertNotEqual(src_before_apply, src_after_apply)
+                                    tab.wait_for_function("document.getElementById('art').complete && document.getElementById('art').naturalWidth === 720")
+                                    rgb_after = sample_art_rgb(250, 190)
+                                    self.assertGreater(min(rgb_after), 240, f'Stale background after maskApply: {rgb_after}')
+
+                                # === 2) Tab shortcut for Eye Toggle (#compareBtn) + tooltip + collision guards ===
+                                eye_btn = tab.locator('#compareBtn')
+                                self.assertIn('(Tab', eye_btn.get_attribute('title') or '')
+                                tab.locator('[data-cmd=move]').focus()
+                                active_before_tab = tab.evaluate('document.activeElement?.dataset?.cmd || ""')
+                                self.assertEqual(active_before_tab, 'move')
+                                tab.keyboard.press('Tab')
+                                self.assertEqual(eye_btn.get_attribute('aria-pressed'), 'true')
+                                self.assertIn('active', eye_btn.get_attribute('class') or '')
+                                self.assertTrue(tab.locator('#artOrig').is_visible())
+                                self.assertIn('(Tab', eye_btn.get_attribute('title') or '')
+                                # Focus must NOT have jumped to another button
+                                self.assertEqual(tab.evaluate('document.activeElement?.dataset?.cmd || ""'), 'move')
+                                # Press Tab again -> turns OFF
+                                tab.keyboard.press('Tab')
+                                self.assertEqual(eye_btn.get_attribute('aria-pressed'), 'false')
+                                self.assertFalse(tab.locator('#artOrig').is_visible())
+
+                                # Collision guards: input, textarea, select, contenteditable, Command Palette, Stroke & Gradient modals
+                                for sel in ('#thai', '#rotation', '#frame'):
+                                    tab.locator(sel).focus()
+                                    tab.keyboard.press('Tab')
+                                    self.assertEqual(eye_btn.get_attribute('aria-pressed'), 'false', f'Tab triggered eye inside {sel}')
+
+                                # contenteditable guard
+                                tab.evaluate("""() => {
+                                  const d = document.createElement('div');
+                                  d.id = 'ceTest'; d.contentEditable = 'true'; d.tabIndex = 0;
+                                  document.body.appendChild(d); d.focus();
+                                }""")
+                                tab.keyboard.press('Tab')
+                                self.assertEqual(eye_btn.get_attribute('aria-pressed'), 'false', 'Tab triggered eye inside contenteditable')
+                                tab.evaluate("document.getElementById('ceTest')?.remove()")
+
+                                # Command Palette (Ctrl+K) open -> Tab must NOT trigger eye
+                                tab.keyboard.press('Control+k')
+                                tab.locator('#modal .pal-item').first.wait_for(state='visible')
+                                self.assertIn('Tab', tab.locator('#modal').inner_text())
+                                tab.keyboard.press('Tab')
+                                self.assertEqual(eye_btn.get_attribute('aria-pressed'), 'false', 'Tab triggered eye in Command Palette')
+                                tab.locator('#close').click()
+                                tab.locator('#dialog').wait_for(state='hidden')
+
+                                # Stroke & Gradient modals open -> Tab must NOT trigger eye
+                                tab.locator('#openStrokeBtn').click()
+                                tab.locator('#strokeModal').wait_for(state='visible')
+                                tab.keyboard.press('Tab')
+                                self.assertEqual(eye_btn.get_attribute('aria-pressed'), 'false', 'Tab triggered eye in Stroke modal')
+                                tab.locator('#smCancel').click()
+                                tab.locator('#strokeModal').wait_for(state='hidden')
+
+                                tab.locator('#openGradBtn').click()
+                                tab.locator('#gradModal').wait_for(state='visible')
+                                tab.keyboard.press('Tab')
+                                self.assertEqual(eye_btn.get_attribute('aria-pressed'), 'false', 'Tab triggered eye in Gradient modal')
+                                tab.locator('#gmCancel').click()
+                                tab.locator('#gradModal').wait_for(state='hidden')
+
+                                # === 3) Thai Keyboard Layout (Kedmanee event.key + physical event.code) ===
+                                tab.evaluate('document.activeElement?.blur?.()')
+                                # KeyV ('อ') toggles Move mode
+                                move_before = 'active' in (tab.locator('[data-cmd=move]').get_attribute('class') or '')
+                                dispatch_thai_key('อ', 'KeyV')
+                                move_after = 'active' in (tab.locator('[data-cmd=move]').get_attribute('class') or '')
+                                self.assertNotEqual(move_after, move_before, 'Thai KeyV (อ) did not toggle Move')
+                                if not move_after:
+                                    dispatch_thai_key('อ', 'KeyV')  # ensure Move is ON for Undo/Redo check
+
+                                # KeyN ('ื') toggles + กรอบ (drawFrame) and Escape exits it
+                                dispatch_thai_key('ื', 'KeyN')
+                                self.assertIn('active', tab.locator('.float.tools [data-cmd=addFrame]').get_attribute('class') or '')
+                                tab.keyboard.press('Escape')
+                                self.assertNotIn('active', tab.locator('.float.tools [data-cmd=addFrame]').get_attribute('class') or '')
+
+                                # KeyT ('ะ') opens TXT modal
+                                dispatch_thai_key('ะ', 'KeyT')
+                                tab.locator('#txtArea').wait_for(state='visible')
+                                tab.locator('#close').click()
+                                tab.locator('#dialog').wait_for(state='hidden')
+
+                                # Ctrl+KeyK ('า') opens Command Palette
+                                dispatch_thai_key('า', 'KeyK', ctrl=True)
+                                tab.locator('#modal .pal-item').first.wait_for(state='visible')
+                                tab.locator('#close').click()
+                                tab.locator('#dialog').wait_for(state='hidden')
+
+                                # Ctrl+KeyZ ('ผ') Undo & Ctrl+KeyY ('ั') / Ctrl+Shift+KeyZ ('(') Redo
+                                dispatch_thai_key('อ', 'KeyV')  # turn Move ON if needed
+                                if 'active' not in (tab.locator('[data-cmd=move]').get_attribute('class') or ''):
+                                    dispatch_thai_key('อ', 'KeyV')
+                                tab.locator('#rotation').fill('15')
+                                tab.locator('#rotation').dispatch_event('change')
+                                tab.locator('#rotation').blur()
+                                tab.wait_for_timeout(120)
+                                self.assertEqual(float(tab.locator('#rotation').input_value()), 15.0)
+                                dispatch_thai_key('ผ', 'KeyZ', ctrl=True)
+                                tab.wait_for_function("() => Number(document.getElementById('rotation').value) === 0")
+                                dispatch_thai_key('ั', 'KeyY', ctrl=True)
+                                tab.wait_for_function("() => Number(document.getElementById('rotation').value) === 15")
+                                dispatch_thai_key('ผ', 'KeyZ', ctrl=True)
+                                tab.wait_for_function("() => Number(document.getElementById('rotation').value) === 0")
+                                dispatch_thai_key('(', 'KeyZ', ctrl=True, shift=True)
+                                tab.wait_for_function("() => Number(document.getElementById('rotation').value) === 15")
+                                dispatch_thai_key('ผ', 'KeyZ', ctrl=True)
+                                tab.wait_for_function("() => Number(document.getElementById('rotation').value) === 0")
+
+                                # BracketLeft ('บ') & BracketRight ('ล') toggle left & right panels
+                                dispatch_thai_key('บ', 'BracketLeft')
+                                self.assertTrue(tab.locator('#left').is_hidden())
+                                dispatch_thai_key('บ', 'BracketLeft')
+                                self.assertTrue(tab.locator('#left').is_visible())
+                                dispatch_thai_key('ล', 'BracketRight')
+                                self.assertTrue(tab.locator('#right').is_hidden())
+                                dispatch_thai_key('ล', 'BracketRight')
+                                self.assertTrue(tab.locator('#right').is_visible())
+
+                                # Digit0 ('จ') triggers Fit
+                                tab.locator('#percent').click()
+                                self.assertEqual(tab.locator('#percent').inner_text(), '100%')
+                                dispatch_thai_key('จ', 'Digit0')
+                                self.assertNotEqual(tab.locator('#percent').inner_text(), '100%')
+
+                                # Ctrl+KeyS ('ห') saves JSON on scale=1, Ctrl+Shift+KeyS ('ฆ') Save As on scale=1.25 (both while focused in textarea!)
+                                json_out = root / f'thai_save_{int(ratio * 100)}.json'
+                                is_save_as = ratio != 1
+                                with patch.object(studio, '_pick_save_path', return_value=json_out):
+                                    tab.locator('#thai').focus()
+                                    dispatch_thai_key('ฆ' if is_save_as else 'ห', 'KeyS', ctrl=True, shift=is_save_as, target_sel='#thai')
+                                    tab.wait_for_function(
+                                        f"() => document.getElementById('notice').textContent.includes('{json_out.name}')",
+                                        timeout=15000,
+                                    )
+                                self.assertTrue(json_out.is_file())
+
+                                # While focused in textarea (#thai), Thai single-key shortcuts MUST be blocked!
+                                tab.locator('#thai').focus()
+                                move_state = 'active' in (tab.locator('[data-cmd=move]').get_attribute('class') or '')
+                                count_before = tab.locator('.bubble').count()
+                                for thai_ch, phys_code in (('อ', 'KeyV'), ('ท', 'KeyM'), ('ื', 'KeyN'), ('ะ', 'KeyT'), (' ', 'Space'), ('Tab', 'Tab'), ('Delete', 'Delete')):
+                                    prevented = dispatch_thai_key(thai_ch, phys_code, target_sel='#thai')
+                                    self.assertFalse(prevented, f'Single-key {phys_code} was prevented inside #thai')
+                                self.assertEqual('active' in (tab.locator('[data-cmd=move]').get_attribute('class') or ''), move_state)
+                                self.assertFalse(tab.locator('#cleanPanel').is_visible())
+                                self.assertFalse(tab.locator('#dialog').is_visible())
+                                self.assertEqual(tab.locator('.bubble').count(), count_before)
+                                self.assertEqual(eye_btn.get_attribute('aria-pressed'), 'false')
+                                self.assertNotIn('hand', tab.locator('#viewport').get_attribute('class') or '')
+                                tab.locator('#thai').blur()
+
+                                self.assertEqual(errors, [], f'Browser JS errors: {errors}')
+                                ctx.close()
+                        browser.close()
+                finally:
+                    server.should_exit = True
+                    thread.join(10)
 
 
 if __name__ == '__main__':

@@ -761,7 +761,8 @@ def image(key: str, n: int, view: str = 'original', bid: str = ''):
         im = compose_page(im, patches) if patches else im
     buf = io.BytesIO()
     im.save(buf, 'PNG', compress_level=1)
-    return Response(buf.getvalue(), media_type='image/png')
+    headers = {'Cache-Control': 'no-store'} if view != 'original' else {'Cache-Control': 'private, max-age=3600'}
+    return Response(buf.getvalue(), media_type='image/png', headers=headers)
 
 
 def _clip_bubble_box(raw, im):
