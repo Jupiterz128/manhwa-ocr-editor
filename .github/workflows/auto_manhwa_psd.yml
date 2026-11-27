@@ -6,6 +6,7 @@ on:
         description: 'ประเภทต้นทางใน Google Drive'
         required: true
         type: choice
+        default: image_folder
         options: [mtp, image_folder]
       drive_link:
         description: 'ลิงก์ไฟล์ MTP หรือโฟลเดอร์ภาพ'
@@ -16,8 +17,17 @@ on:
         type: choice
         default: ko+en
         options: [ko+en, en, zh+en, zh_tw+en]
+      translation_mode:
+        description: 'โหมดแปลข้อความ (manual_drive = ส่ง 01_raw_text.txt ขึ้น Drive + แจ้ง Discord + รอ 02_translated.txt | gemini_auto = แปลอัตโนมัติด้วย Gemini)'
+        type: choice
+        default: manual_drive
+        options: [manual_drive, gemini_auto]
+      wait_timeout_minutes:
+        description: 'เวลารอไฟล์ 02_translated.txt บน Drive (นาที, ใส่ 0 = ไม่รอ จบทันทีหลังอัปโหลด 01_raw_text.txt)'
+        type: number
+        default: 60
       translation_drive_link:
-        description: 'ลิงก์ไฟล์ TXT ที่แปลแล้ว (เว้นว่างเพื่อใช้ Gemini แปลอัตโนมัติในรอบเดียว)'
+        description: 'ลิงก์ไฟล์ TXT ที่แปลแล้ว (ทางเลือกเสริม: เว้นว่างเพื่อใช้โหมด translation_mode ด้านบน)'
         type: string
         default: ''
       translation_note:
@@ -25,10 +35,6 @@ on:
         type: string
         required: false
         default: ''
-      auto_translate:
-        description: 'แปลภาษาไทยอัตโนมัติด้วย Gemini (google-genai) ในรอบเดียวเมื่อไม่มีไฟล์แปล'
-        type: boolean
-        default: true
       auto_stroke:
         description: 'ดูดสีเส้นขอบตัวอักษร'
         type: boolean
@@ -85,8 +91,9 @@ jobs:
           MODE: ${{ inputs.input_mode }}
           SOURCE: ${{ inputs.drive_link }}
           TRANSLATION: ${{ inputs.translation_drive_link }}
+          TRANSLATION_MODE: ${{ inputs.translation_mode }}
+          WAIT_TIMEOUT_MINUTES: ${{ inputs.wait_timeout_minutes }}
           TRANSLATION_NOTE: ${{ inputs.translation_note }}
-          AUTO_TRANSLATE: ${{ inputs.auto_translate }}
           AUTO_STROKE: ${{ inputs.auto_stroke }}
           AUTO_GRADIENT: ${{ inputs.auto_gradient }}
           EXPORT_FORMAT: ${{ inputs.export_format }}
@@ -95,6 +102,7 @@ jobs:
           OCR_LANG: ${{ inputs.ocr_lang }}
           STITCH: ${{ inputs.use_smart_stitch }}
           GH_GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
           $env:PYTHONIOENCODING = 'utf-8'
@@ -108,9 +116,15 @@ jobs:
           if ($env:AUTO_GRADIENT -eq 'true') { $params += '--auto-gradient' }
           if (![string]::IsNullOrWhiteSpace($env:TRANSLATION_NOTE)) { $params += @("--translation-note=$env:TRANSLATION_NOTE") }
           if ($env:PRESET -ne 'auto') { $params += @('--preset',$env:PRESET) }
+          if ($env:MODE -eq 'image_folder') {
+            if ($env:TRANSLATION_MODE) { $params += @('--translation-mode',$env:TRANSLATION_MODE) }
+            if ($env:WAIT_TIMEOUT_MINUTES -ne $null -and $env:WAIT_TIMEOUT_MINUTES -ne '') {
+              $params += @('--wait-timeout-minutes',$env:WAIT_TIMEOUT_MINUTES)
+            }
+          }
           if ($env:TRANSLATION) {
             $params += @('--translation-link',$env:TRANSLATION)
-          } elseif ($env:MODE -eq 'image_folder' -and $env:AUTO_TRANSLATE -eq 'true') {
+          } elseif ($env:MODE -eq 'image_folder' -and $env:TRANSLATION_MODE -eq 'gemini_auto') {
             $params += @('--auto-translate-gemini')
           }
           & (Join-Path $root '.venv\Scripts\python.exe') @params

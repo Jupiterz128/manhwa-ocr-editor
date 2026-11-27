@@ -7,8 +7,15 @@ import time
 
 from text_layout import FRAME_TYPE_LABELS, extract_frame_tag, normalize
 
-COMPONENT_VERSION = '4.0'
+COMPONENT_VERSION = '4.1'
 DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash'
+DEFAULT_MAX_BATCH_SIZE = 48
+DEFAULT_MAX_OUTPUT_TOKENS = 16384
+DEFAULT_THINKING_BUDGET = 1024
+
+
+class TruncatedBatchError(ValueError):
+    """Raised when Gemini stops due to MAX_TOKENS or truncates the JSON payload."""
 
 _SYSTEM_PROMPT = """แปลการ์ตูนและเว็บตูนเป็นภาษาไทยสำหรับอ่านในบอลลูน อ่านบทตามลำดับทั้งตอนก่อนเลือกสำนวน
 ให้ตัวละครพูดเหมือนคนไทยพูดกันจริง ถ่ายทอดเจตนาและอารมณ์แทนการเรียงคำตามต้นฉบับ
@@ -115,8 +122,19 @@ def _is_retryable_error(exc):
     ))
 
 
+def _response_hit_max_tokens(response):
+    candidates = getattr(response, 'candidates', None) or []
+    for cand in candidates:
+        reason = getattr(cand, 'finish_reason', None)
+        if reason is not None and 'MAX_TOKENS' in str(reason).upper():
+            return True
+    return False
+
+
 def _call_gemini_batch(client, model, items, source_lang='ko+en', context_hint='', max_retries=3,
-                       translation_note: str = '', chapter_context=None):
+                       translation_note: str = '', chapter_context=None,
+                       max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+                       thinking_budget=None):
     from google.genai import types
 
     payload = {
@@ -136,12 +154,19 @@ def _call_gemini_batch(client, model, items, source_lang='ko+en', context_hint='
         'โดยรักษาความต่อเนื่องของบทสนทนาทั้งตอน:\n'
         + json.dumps(payload, ensure_ascii=False)
     )
-    config = types.GenerateContentConfig(
+    config_kwargs = dict(
         system_instruction=_SYSTEM_PROMPT,
         response_mime_type='application/json',
         response_schema=_RESPONSE_SCHEMA,
         temperature=0.3,
+        max_output_tokens=max(DEFAULT_MAX_OUTPUT_TOKENS, int(max_output_tokens or DEFAULT_MAX_OUTPUT_TOKENS)),
     )
+    budget = thinking_budget
+    if budget is None and 'gemini-2.5-flash' in (model or '').lower():
+        budget = DEFAULT_THINKING_BUDGET
+    if budget is not None and hasattr(types, 'ThinkingConfig'):
+        config_kwargs['thinking_config'] = types.ThinkingConfig(thinking_budget=int(budget))
+    config = types.GenerateContentConfig(**config_kwargs)
 
     last_exc = None
     for attempt in range(max_retries):
@@ -151,6 +176,8 @@ def _call_gemini_batch(client, model, items, source_lang='ko+en', context_hint='
                 contents=prompt,
                 config=config,
             )
+            if _response_hit_max_tokens(response):
+                raise TruncatedBatchError('Gemini ตอบกลับถูกตัดกลางคัน (MAX_TOKENS)')
             data = _extract_json_payload(response.text)
             rows = data.get('translations') if isinstance(data, dict) else data
             if not isinstance(rows, list):
@@ -172,12 +199,90 @@ def _call_gemini_batch(client, model, items, source_lang='ko+en', context_hint='
                 if isinstance(thai, str) and extract_frame_tag(thai.strip())[1].strip():
                     result[bid] = thai.strip()
             return result
+        except (json.JSONDecodeError, TruncatedBatchError) as exc:
+            last_exc = exc
+            if len(items) > 1 or attempt + 1 >= max_retries:
+                raise
+            time.sleep(min(5.0, 1.5 * (attempt + 1)))
         except Exception as exc:
             last_exc = exc
             if attempt + 1 >= max_retries or not _is_retryable_error(exc):
                 raise
             time.sleep(min(15.0, 2.0 * (2 ** attempt)))
     raise last_exc
+
+
+def _call_gemini_with_autosplit(
+    client,
+    model,
+    items,
+    *,
+    source_lang='ko+en',
+    context_hint='',
+    translation_note: str = '',
+    chapter_context=None,
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+    thinking_budget=None,
+    log=None,
+):
+    """Call Gemini for `items`, automatically halving the batch on JSON truncation / MAX_TOKENS."""
+    try:
+        res = _call_gemini_batch(
+            client,
+            model,
+            items,
+            source_lang=source_lang,
+            context_hint=context_hint,
+            translation_note=translation_note,
+            chapter_context=chapter_context,
+            max_output_tokens=max_output_tokens,
+            thinking_budget=thinking_budget,
+        )
+        return res, 1
+    except (json.JSONDecodeError, TruncatedBatchError) as exc:
+        if len(items) <= 1:
+            raise
+        mid = len(items) // 2
+        left, right = items[:mid], items[mid:]
+        if log:
+            msg = (
+                f'Gemini JSON ถูกตัดกลางคัน ({exc}) — '
+                f'แบ่งครึ่ง batch {len(items)} กรอบ เป็น {len(left)} + {len(right)} กรอบอัตโนมัติ'
+            )
+            log(msg, flush=True) if log is print else log(msg)
+        res_left, calls_left = _call_gemini_with_autosplit(
+            client,
+            model,
+            left,
+            source_lang=source_lang,
+            context_hint=context_hint,
+            translation_note=translation_note,
+            chapter_context=chapter_context,
+            max_output_tokens=max_output_tokens,
+            thinking_budget=thinking_budget,
+            log=log,
+        )
+        right_context = chapter_context
+        if chapter_context is not None and res_left:
+            right_context = [
+                dict(row, thai=res_left.get(row['id']) or row.get('thai', ''))
+                for row in chapter_context
+            ]
+        res_right, calls_right = _call_gemini_with_autosplit(
+            client,
+            model,
+            right,
+            source_lang=source_lang,
+            context_hint=context_hint,
+            translation_note=translation_note,
+            chapter_context=right_context,
+            max_output_tokens=max_output_tokens,
+            thinking_budget=thinking_budget,
+            log=log,
+        )
+        merged = dict(res_left)
+        merged.update(res_right)
+        return merged, 1 + calls_left + calls_right
 
 
 def translate_pages_with_gemini(
@@ -187,14 +292,16 @@ def translate_pages_with_gemini(
     api_key=None,
     overwrite=False,
     context_hint='',
-    max_batch_size=200,
+    max_batch_size=DEFAULT_MAX_BATCH_SIZE,
     log=print,
     translation_note: str = "",
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+    thinking_budget=None,
 ):
-    """Translate all bubbles across `pages` into Thai in a single google-genai pass.
+    """Translate all bubbles across `pages` into Thai using google-genai with full chapter context.
 
-    Normal chapters (<= `max_batch_size` bubbles) are translated in one single API request
-    so Gemini sees the full chapter context.
+    Defaults to `DEFAULT_MAX_BATCH_SIZE` (48) bubbles per request with `max_output_tokens >= 16384`
+    and automatic recursive batch splitting on truncated JSON / MAX_TOKENS responses.
     """
     model_name = (model or os.environ.get('GEMINI_MODEL') or DEFAULT_GEMINI_MODEL).strip()
     chapter = []
@@ -252,7 +359,7 @@ def translate_pages_with_gemini(
 
     changes = {}
     tags = {}
-    batch_size = max(1, int(max_batch_size or 200))
+    batch_size = max(1, int(max_batch_size or DEFAULT_MAX_BATCH_SIZE))
     batches = [candidates[i:i + batch_size] for i in range(0, len(candidates), batch_size)]
     request_count = 0
     for batch_idx, batch in enumerate(batches, 1):
@@ -276,10 +383,20 @@ def translate_pages_with_gemini(
                     context = [dict(item, thai=translated.get(item['id']) or changes.get(item['id'])
                                     or getattr(bubble_by_id[item['id']], 'translation', ''))
                                for item in chapter]
-                translated.update(_call_gemini_batch(
-                    client, model_name, subset, source_lang=source_lang, context_hint=context_hint,
-                    translation_note=translation_note, chapter_context=context))
-                request_count += 1
+                chunk_res, chunk_calls = _call_gemini_with_autosplit(
+                    client,
+                    model_name,
+                    subset,
+                    source_lang=source_lang,
+                    context_hint=context_hint,
+                    translation_note=translation_note,
+                    chapter_context=context,
+                    max_output_tokens=max_output_tokens,
+                    thinking_budget=thinking_budget,
+                    log=log,
+                )
+                translated.update(chunk_res)
+                request_count += chunk_calls
             pending = [item for item in batch if item['id'] not in translated]
             if not pending:
                 break

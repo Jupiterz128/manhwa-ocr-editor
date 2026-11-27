@@ -97,9 +97,86 @@ class GeminiSinglePassTranslatorTests(unittest.TestCase):
         client = MagicMock()
         client.models.generate_content.side_effect = respond
         with patch('google.genai.Client', return_value=client):
-            gt.translate_pages_with_gemini([Page('p', bubbles)], api_key='test', log=None)
+            gt.translate_pages_with_gemini([Page('p', bubbles)], api_key='test', max_batch_size=200, log=None)
         self.assertEqual(requests[1:], [['b150', 'b151']])
         self.assertTrue(all(b.translation == 'แปล ' + b.id for b in bubbles))
+
+    def test_default_batch_size_output_tokens_and_thinking_budget(self):
+        self.assertTrue(45 <= gt.DEFAULT_MAX_BATCH_SIZE <= 50)
+        bubbles = [Bubble([0, 0, 30, 30], id=f'b{i}', text=f'line {i}') for i in range(gt.DEFAULT_MAX_BATCH_SIZE + 2)]
+        seen_configs = []
+        seen_sizes = []
+
+        def respond(**kwargs):
+            seen_configs.append(kwargs['config'])
+            payload = json.loads(kwargs['contents'].split('\n', 1)[1])
+            ids = [item['id'] for item in payload['items']]
+            seen_sizes.append(len(ids))
+            rows = [{'id': bid, 'thai': f'คำแปล {bid}'} for bid in ids]
+            return SimpleNamespace(text=json.dumps({'translations': rows}, ensure_ascii=False))
+
+        client = MagicMock()
+        client.models.generate_content.side_effect = respond
+        with patch('google.genai.Client', return_value=client):
+            report = gt.translate_pages_with_gemini([Page('p', bubbles)], api_key='test', log=None)
+
+        self.assertEqual(seen_sizes, [gt.DEFAULT_MAX_BATCH_SIZE, 2])
+        self.assertEqual(report['translated_count'], len(bubbles))
+        for cfg in seen_configs:
+            self.assertGreaterEqual(cfg.max_output_tokens, 16384)
+            self.assertIsNotNone(cfg.thinking_config)
+            self.assertLessEqual(cfg.thinking_config.thinking_budget, 2048)
+
+    def test_autosplit_halves_batch_on_unterminated_string_json_error(self):
+        bubbles = [Bubble([0, 0, 30, 30], id=f'b{i}', text=f'line {i}') for i in range(6)]
+        request_sizes = []
+
+        def respond(**kwargs):
+            payload = json.loads(kwargs['contents'].split('\n', 1)[1])
+            ids = [item['id'] for item in payload['items']]
+            request_sizes.append(len(ids))
+            if len(ids) > 3:
+                # Simulate truncated JSON (Unterminated string) from hitting output limit
+                return SimpleNamespace(text='{"translations":[{"id":"b0","thai":"ข้อความที่ถูกตัดกลาง')
+            rows = [{'id': bid, 'thai': f'แปลแล้ว {bid}'} for bid in ids]
+            return SimpleNamespace(text=json.dumps({'translations': rows}, ensure_ascii=False))
+
+        client = MagicMock()
+        client.models.generate_content.side_effect = respond
+        with patch('google.genai.Client', return_value=client):
+            report = gt.translate_pages_with_gemini([Page('p', bubbles)], api_key='test', log=None)
+
+        self.assertEqual(request_sizes, [6, 3, 3])
+        self.assertEqual(report['translated_count'], 6)
+        self.assertTrue(all(b.translation == f'แปลแล้ว {b.id}' for b in bubbles))
+
+    def test_autosplit_halves_batch_on_max_tokens_finish_reason(self):
+        bubbles = [Bubble([0, 0, 30, 30], id=f'b{i}', text=f'line {i}') for i in range(4)]
+        request_sizes = []
+
+        def respond(**kwargs):
+            payload = json.loads(kwargs['contents'].split('\n', 1)[1])
+            ids = [item['id'] for item in payload['items']]
+            request_sizes.append(len(ids))
+            if len(ids) > 2:
+                return SimpleNamespace(
+                    text='{"translations":[]}',
+                    candidates=[SimpleNamespace(finish_reason='FinishReason.MAX_TOKENS')],
+                )
+            rows = [{'id': bid, 'thai': f'แปล {bid}'} for bid in ids]
+            return SimpleNamespace(
+                text=json.dumps({'translations': rows}, ensure_ascii=False),
+                candidates=[SimpleNamespace(finish_reason='FinishReason.STOP')],
+            )
+
+        client = MagicMock()
+        client.models.generate_content.side_effect = respond
+        with patch('google.genai.Client', return_value=client):
+            report = gt.translate_pages_with_gemini([Page('p', bubbles)], api_key='test', log=None)
+
+        self.assertEqual(request_sizes, [4, 2, 2])
+        self.assertEqual(report['translated_count'], 4)
+        self.assertTrue(all(b.translation == f'แปล {b.id}' for b in bubbles))
 
     def test_duplicate_result_id_rejected_before_applying(self):
         page = Page('p', [Bubble([0,0,30,30], id='a', text='Run!')])
