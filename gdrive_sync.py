@@ -251,19 +251,33 @@ def upsert_file_to_folder(local_path,folder_id,remote_name=None,mimetype=None):
 
 
 def find_translation_file(folder_id,filename=TRANSLATED_TEXT_FILENAME):
-    """Find `02_translated.txt` (plain text) or a Google Doc named `02_translated`."""
+    """Find a translation file in `folder_id`.
+
+    Priority 1: `02_translated.txt` (or `filename`) / Google Doc named `02_translated`.
+    Priority 2 (fallback): any `.txt` file (`mimeType == 'text/plain'` or `.txt` suffix)
+    or Google Doc in the same folder, excluding `01_raw_text.txt` / `01_raw_text` (case-insensitive).
+    When multiple files match at the same priority, the most recently modified file wins.
+    """
     target_full=filename.strip().casefold()
     target_stem=Path(filename).stem.strip().casefold()
-    matches=[]
+    excluded={RAW_TEXT_FILENAME.strip().casefold(),Path(RAW_TEXT_FILENAME).stem.strip().casefold()}
+    priority_matches=[]
+    fallback_matches=[]
     for record in children(folder_id):
         mime=record.get('mimeType') or ''
         if mime==FOLDER:
             continue
         name=(record.get('name') or '').strip().casefold()
-        if name==target_full:
-            matches.append(record)
-        elif mime==GDOC and name in (target_stem,target_full):
-            matches.append(record)
+        if not name:
+            continue
+        if name==target_full or (mime==GDOC and name==target_stem):
+            priority_matches.append(record)
+            continue
+        if name in excluded:
+            continue
+        if mime=='text/plain' or name.endswith('.txt') or mime==GDOC:
+            fallback_matches.append(record)
+    matches=priority_matches or fallback_matches
     if not matches:
         return None
     matches.sort(key=lambda r:(r.get('modifiedTime') or '',1 if r.get('mimeType')!=GDOC else 0),reverse=True)
@@ -335,7 +349,7 @@ def wait_for_translation_file(
             return None
         if log and (poll_count==1 or poll_count%4==0):
             mins_left=max(1,int((remaining+59)//60))
-            msg=f'กำลังรอไฟล์ {filename} บน Drive... (เหลือเวลาอีก ~{mins_left} นาที)'
+            msg=f'กำลังรอไฟล์คำแปล (.txt ชื่อใดก็ได้ หรือ Google Doc) บน Drive... (เหลือเวลาอีก ~{mins_left} นาที)'
             log(msg,flush=True) if log is print else log(msg)
         time.sleep(min(max(0.0,float(poll_interval)),remaining))
 

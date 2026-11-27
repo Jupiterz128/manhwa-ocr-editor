@@ -229,15 +229,19 @@ def _find_existing_translation(drive, folder_ids, dest_path):
 
 def _notify_manual_drive_waiting(episode, total_bubbles, folder_link, raw_file_link, timeout_minutes):
     timeout_label = _format_minutes(timeout_minutes)
+    base_instruction = (
+        'นำ `01_raw_text.txt` ไปแปล แล้วอัปโหลดไฟล์ `.txt` ชื่ออะไรก็ได้ (หรือสร้าง Google Doc) '
+        'ลงโฟลเดอร์ Drive เดิมได้เลย (ขอแค่ไม่ใช่ชื่อ `01_raw_text.txt`)'
+    )
     if timeout_minutes > 0:
         instruction = (
-            f'นำ `01_raw_text.txt` ไปแปล แล้วอัปโหลด/วางไฟล์ชื่อ `02_translated.txt` '
-            f'ลงโฟลเดอร์ Drive เดิมได้เลย (กำลังรอตรวจอัตโนมัติทุก {int(POLL_INTERVAL_SECONDS)} วินาที สูงสุด {timeout_label} นาที)'
+            f'{base_instruction} '
+            f'(กำลังรอตรวจอัตโนมัติทุก {int(POLL_INTERVAL_SECONDS)} วินาที สูงสุด {timeout_label} นาที)'
         )
     else:
         instruction = (
-            'นำ `01_raw_text.txt` ไปแปล แล้วอัปโหลด/วางไฟล์ชื่อ `02_translated.txt` '
-            'ลงโฟลเดอร์ Drive เดิม จากนั้นกด Run Workflow เดิมอีกรอบ โปรแกรมจะข้ามขั้นตอนคลีนแล้วส่งออก PSD ให้ทันที '
+            f'{base_instruction} '
+            'จากนั้นกด Run Workflow เดิมอีกรอบ โปรแกรมจะข้ามขั้นตอนคลีนแล้วส่งออก PSD ให้ทันที '
             '(โหมดไม่รอ: wait_timeout_minutes = 0)'
         )
     print(f'พร้อมแปลตอน "{episode}" ({total_bubbles} บับเบิล)', flush=True)
@@ -266,10 +270,49 @@ def _notify_manual_drive_waiting(episode, total_bubbles, folder_link, raw_file_l
     )
 
 
+def _notify_manual_drive_translation_found(episode, translation_filename, *, folder_link=None, from_cache=False):
+    if from_cache:
+        msg = (
+            f'พบไฟล์คำแปล `{translation_filename}` และแคชคลีนของตอน "{episode}" แล้ว '
+            '— ข้าม OCR/Clean และข้ามการรอ ไปจัดฟอนต์และส่งออก PSD ทันที'
+        )
+    else:
+        msg = (
+            f'พบไฟล์คำแปล `{translation_filename}` แล้ว '
+            '— กำลังนำเข้า จัดฟอนต์ และส่งออก PSD'
+        )
+    print(f'📄 {msg}', flush=True)
+    summary_lines = [
+        f'## 📄 ตรวจพบไฟล์คำแปล — {episode}',
+        '',
+        f'- **ไฟล์คำแปลที่หยิบมาใช้:** `{translation_filename}`',
+    ]
+    if folder_link:
+        summary_lines.append(f'- **โฟลเดอร์ Google Drive:** [{episode}]({folder_link})')
+    summary_lines.append('')
+    summary_lines.append(f'> {msg}')
+    append_step_summary('\n'.join(summary_lines))
+
+    fields = [
+        {'name': 'ชื่อตอน', 'value': episode, 'inline': True},
+        {'name': '📄 ไฟล์คำแปลที่หยิบมาใช้', 'value': translation_filename, 'inline': True},
+    ]
+    if folder_link:
+        fields.append({'name': '📁 โฟลเดอร์ Drive', 'value': f'[เปิดโฟลเดอร์ Drive]({folder_link})', 'inline': False})
+    send_discord_notification(
+        title=f'📄 พบไฟล์คำแปลแล้ว: {episode}',
+        description=msg,
+        color=DISCORD_COLOR_INFO,
+        url=folder_link,
+        fields=fields,
+    )
+
+
 def _notify_manual_drive_timeout(episode, folder_link, timeout_minutes):
     timeout_label = _format_minutes(timeout_minutes)
     msg = (
-        '⏳ หมดเวลารอแล้ว — เมื่อวาง `02_translated.txt` เสร็จ '
+        '⏳ หมดเวลารอแล้ว — เมื่ออัปโหลดไฟล์คำแปล `.txt` ชื่ออะไรก็ได้ '
+        '(หรือสร้าง Google Doc ที่ไม่ใช่ `01_raw_text.txt`) เสร็จ '
         'ให้กด Run Workflow เดิมอีกรอบ โปรแกรมจะข้ามขั้นตอนคลีนแล้วส่งออก PSD ให้ทันที'
     )
     print(f'{msg} (รอครบ {timeout_label} นาที) — {folder_link}', flush=True)
@@ -289,26 +332,34 @@ def _notify_manual_drive_timeout(episode, folder_link, timeout_minutes):
     )
 
 
-def _notify_export_complete(episode, dest_link, exported_names):
+def _notify_export_complete(episode, dest_link, exported_names, *, translation_filename=None):
     summary_files = ', '.join(exported_names[:6])
     if len(exported_names) > 6:
         summary_files += f' (+อีก {len(exported_names) - 6} ไฟล์)'
     print(f'✅ เสร็จเรียบร้อย! ส่งออก PSD ขึ้น Drive แล้ว: {dest_link}', flush=True)
-    append_step_summary(
-        f'## ✅ เสร็จเรียบร้อย! ส่งออก PSD ขึ้น Drive แล้ว — {episode}\n\n'
-        f'- **โฟลเดอร์ผลลัพธ์:** [{episode}]({dest_link})\n'
-        f'- **ไฟล์ที่อัปโหลด ({len(exported_names)} ไฟล์):** {summary_files or "-"}'
-    )
+    summary_lines = [
+        f'## ✅ เสร็จเรียบร้อย! ส่งออก PSD ขึ้น Drive แล้ว — {episode}',
+        '',
+        f'- **โฟลเดอร์ผลลัพธ์:** [{episode}]({dest_link})',
+        f'- **ไฟล์ที่อัปโหลด ({len(exported_names)} ไฟล์):** {summary_files or "-"}',
+    ]
+    if translation_filename:
+        summary_lines.append(f'- **ไฟล์คำแปลที่ใช้:** `{translation_filename}`')
+    append_step_summary('\n'.join(summary_lines))
+
+    fields = [
+        {'name': 'ชื่อตอน', 'value': episode, 'inline': True},
+        {'name': 'จำนวนไฟล์', 'value': f'{len(exported_names)} ไฟล์', 'inline': True},
+    ]
+    if translation_filename:
+        fields.append({'name': '📄 ไฟล์คำแปลที่ใช้', 'value': translation_filename, 'inline': True})
+    fields.append({'name': '📁 โฟลเดอร์ผลลัพธ์', 'value': f'[เปิดโฟลเดอร์ PSD บน Drive]({dest_link})', 'inline': False})
     send_discord_notification(
         title='✅ เสร็จเรียบร้อย! ส่งออก PSD ขึ้น Drive แล้ว',
         description=f'ตอน **{episode}** ส่งออกและอัปโหลดขึ้น Google Drive เรียบร้อยแล้ว ({len(exported_names)} ไฟล์)',
         color=DISCORD_COLOR_SUCCESS,
         url=dest_link,
-        fields=[
-            {'name': 'ชื่อตอน', 'value': episode, 'inline': True},
-            {'name': 'จำนวนไฟล์', 'value': f'{len(exported_names)} ไฟล์', 'inline': True},
-            {'name': '📁 โฟลเดอร์ผลลัพธ์', 'value': f'[เปิดโฟลเดอร์ PSD บน Drive]({dest_link})', 'inline': False},
-        ],
+        fields=fields,
     )
 
 
@@ -338,6 +389,7 @@ def run(args):
     episode = ''
     text_folder = None
     existing_manual_translation = None
+    selected_translation_name = None
     manual_cache_hit = False
     drive = None
     source_id = None
@@ -387,16 +439,20 @@ def run(args):
                     args.skip_clean = True
                     if existing_manual_translation is not None:
                         args.translation = existing_manual_translation[0]
+                        selected_translation_name = (
+                            existing_manual_translation[1].get('name') or drive.TRANSLATED_TEXT_FILENAME
+                        )
                         args.smart_stitch = want_smart_stitch
-                        print(
-                            f'พบ 02_translated.txt และแคชคลีนของตอน "{episode}" แล้ว '
-                            '— ข้าม OCR/Clean และข้ามการรอ ไปจัดฟอนต์และส่งออก PSD ทันที',
-                            flush=True,
+                        _notify_manual_drive_translation_found(
+                            episode,
+                            selected_translation_name,
+                            folder_link=drive.folder_url(text_folder) if text_folder else None,
+                            from_cache=True,
                         )
                     else:
                         args.smart_stitch = False
                         print(
-                            f'พบแคชคลีนของตอน "{episode}" แล้ว — ข้าม OCR/Clean และเตรียมรอไฟล์ 02_translated.txt',
+                            f'พบแคชคลีนของตอน "{episode}" แล้ว — ข้าม OCR/Clean และเตรียมรอไฟล์คำแปล (.txt ชื่อใดก็ได้ หรือ Google Doc)',
                             flush=True,
                         )
                 else:
@@ -636,6 +692,14 @@ def run(args):
                     total_bubbles = sum(len(p.bubbles) for p in pages)
                     if existing_manual_translation is not None:
                         tr_path = existing_manual_translation[0]
+                        selected_translation_name = (
+                            existing_manual_translation[1].get('name') or drive.TRANSLATED_TEXT_FILENAME
+                        )
+                        _notify_manual_drive_translation_found(
+                            episode,
+                            selected_translation_name,
+                            folder_link=drive.folder_url(text_folder),
+                        )
                     elif total_bubbles == 0:
                         tr_path = None
                         print('ไม่พบบับเบิลข้อความในตอนนี้ ข้ามขั้นตอนรอคำแปลและส่งออกไฟล์คลีนทันที', flush=True)
@@ -669,7 +733,12 @@ def run(args):
                             _notify_manual_drive_timeout(episode, folder_link, wait_timeout_minutes)
                             return 0
                         tr_path = waited[0]
-                        print(f'พบไฟล์คำแปลแล้ว ({waited[1].get("name")}) — กำลังนำเข้า จัดฟอนต์ และส่งออก PSD', flush=True)
+                        selected_translation_name = waited[1].get('name') or drive.TRANSLATED_TEXT_FILENAME
+                        _notify_manual_drive_translation_found(
+                            episode,
+                            selected_translation_name,
+                            folder_link=folder_link,
+                        )
                     if tr_path is not None:
                         _apply_translations(tr_path, pages)
                         if want_smart_stitch:
@@ -722,7 +791,12 @@ def run(args):
                     drive.upload_file_to_folder(path, dest)
                 dest_link = drive.folder_url(dest)
                 if is_manual_drive or os.environ.get('DISCORD_WEBHOOK_URL') or os.environ.get('GITHUB_STEP_SUMMARY'):
-                    _notify_export_complete(episode, dest_link, [p.name for p in files_to_upload])
+                    _notify_export_complete(
+                        episode,
+                        dest_link,
+                        [p.name for p in files_to_upload],
+                        translation_filename=selected_translation_name,
+                    )
         finally:
             checkpoint(output / 'project.json', pages, drafts, args.preset)
             app.atomic_json(output / 'clean_report.json', stats)

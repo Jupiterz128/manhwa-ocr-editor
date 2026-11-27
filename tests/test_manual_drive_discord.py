@@ -106,6 +106,83 @@ class GDriveManualHelpersTests(unittest.TestCase):
         self.assertEqual(found_doc['id'], 'g1')
         self.assertEqual(found_doc['mimeType'], drive.GDOC)
 
+    def test_find_translation_file_fallback_accepts_thai_or_any_txt_and_gdoc(self):
+        thai_txt_files = [
+            {'id': 'sub1', 'name': 'nested', 'mimeType': drive.FOLDER, 'modifiedTime': '2026-11-27T10:20:00Z'},
+            {'id': 'img1', 'name': '01.png', 'mimeType': 'image/png', 'modifiedTime': '2026-11-27T10:15:00Z'},
+            {'id': 'raw1', 'name': '01_raw_text.txt', 'mimeType': 'text/plain', 'modifiedTime': '2026-11-27T10:00:00Z'},
+            {'id': 'th66', 'name': 'แปลตอนที่66.txt', 'mimeType': 'text/plain', 'modifiedTime': '2026-11-27T10:05:00Z'},
+        ]
+        with patch.object(drive, 'children', return_value=iter(thai_txt_files)):
+            found = drive.find_translation_file('folder1')
+        self.assertIsNotNone(found)
+        self.assertEqual(found['id'], 'th66')
+        self.assertEqual(found['name'], 'แปลตอนที่66.txt')
+
+        # Fallback also matches .txt by extension even with generic mimeType
+        octet_txt = [
+            {'id': 'raw1', 'name': '01_raw_text.txt', 'mimeType': 'text/plain', 'modifiedTime': '2026-11-27T10:00:00Z'},
+            {'id': 'oct1', 'name': 'chapter66_translated.TXT', 'mimeType': 'application/octet-stream', 'modifiedTime': '2026-11-27T10:06:00Z'},
+        ]
+        with patch.object(drive, 'children', return_value=iter(octet_txt)):
+            found_oct = drive.find_translation_file('folder1')
+        self.assertEqual(found_oct['id'], 'oct1')
+
+        # Fallback also matches text/plain without .txt suffix and any-name Google Doc
+        plain_no_ext = [
+            {'id': 'p1', 'name': 'คำแปลตอน66', 'mimeType': 'text/plain', 'modifiedTime': '2026-11-27T10:07:00Z'},
+        ]
+        with patch.object(drive, 'children', return_value=iter(plain_no_ext)):
+            self.assertEqual(drive.find_translation_file('folder1')['id'], 'p1')
+
+        thai_gdoc = [
+            {'id': 'raw1', 'name': '01_raw_text.txt', 'mimeType': 'text/plain', 'modifiedTime': '2026-11-27T10:00:00Z'},
+            {'id': 'gd66', 'name': 'คำแปลตอนที่ 66', 'mimeType': drive.GDOC, 'modifiedTime': '2026-11-27T10:08:00Z'},
+        ]
+        with patch.object(drive, 'children', return_value=iter(thai_gdoc)):
+            found_gdoc = drive.find_translation_file('folder1')
+        self.assertEqual(found_gdoc['id'], 'gd66')
+        self.assertEqual(found_gdoc['mimeType'], drive.GDOC)
+
+    def test_find_translation_file_never_picks_raw_text_file(self):
+        only_raw_and_non_text = [
+            {'id': 'raw1', 'name': '01_raw_text.txt', 'mimeType': 'text/plain', 'modifiedTime': '2026-11-27T10:00:00Z'},
+            {'id': 'raw2', 'name': '01_RAW_TEXT.TXT', 'mimeType': 'text/plain', 'modifiedTime': '2026-11-27T10:05:00Z'},
+            {'id': 'raw3', 'name': '01_raw_text', 'mimeType': drive.GDOC, 'modifiedTime': '2026-11-27T10:06:00Z'},
+            {'id': 'raw4', 'name': '01_Raw_Text', 'mimeType': 'text/plain', 'modifiedTime': '2026-11-27T10:07:00Z'},
+            {'id': 'img1', 'name': '01.png', 'mimeType': 'image/png', 'modifiedTime': '2026-11-27T10:08:00Z'},
+            {'id': 'psd1', 'name': '01.psd', 'mimeType': 'image/vnd.adobe.photoshop', 'modifiedTime': '2026-11-27T10:09:00Z'},
+            {'id': 'dir1', 'name': 'sub.txt', 'mimeType': drive.FOLDER, 'modifiedTime': '2026-11-27T10:10:00Z'},
+        ]
+        with patch.object(drive, 'children', return_value=iter(only_raw_and_non_text)):
+            self.assertIsNone(drive.find_translation_file('folder1'))
+
+    def test_find_translation_file_picks_latest_modified_and_prioritizes_02_translated(self):
+        multiple_fallbacks = [
+            {'id': 'raw1', 'name': '01_raw_text.txt', 'mimeType': 'text/plain', 'modifiedTime': '2026-11-27T11:00:00Z'},
+            {'id': 'old1', 'name': 'แปลรอบแรก.txt', 'mimeType': 'text/plain', 'modifiedTime': '2026-11-27T10:05:00Z'},
+            {'id': 'new1', 'name': 'แปลตอนที่66_แก้แล้ว.txt', 'mimeType': 'text/plain', 'modifiedTime': '2026-11-27T10:25:00Z'},
+            {'id': 'mid1', 'name': 'คำแปลชั่วคราว', 'mimeType': drive.GDOC, 'modifiedTime': '2026-11-27T10:15:00Z'},
+        ]
+        with patch.object(drive, 'children', return_value=iter(multiple_fallbacks)):
+            picked = drive.find_translation_file('folder1')
+        self.assertEqual(picked['id'], 'new1')
+
+        # Priority 1 (`02_translated.txt` or Google Doc `02_translated`) always wins over fallback files
+        with_priority_txt = multiple_fallbacks + [
+            {'id': 'prio_txt', 'name': '02_translated.txt', 'mimeType': 'text/plain', 'modifiedTime': '2026-11-27T10:01:00Z'},
+        ]
+        with patch.object(drive, 'children', return_value=iter(with_priority_txt)):
+            picked_prio = drive.find_translation_file('folder1')
+        self.assertEqual(picked_prio['id'], 'prio_txt')
+
+        with_priority_gdoc = multiple_fallbacks + [
+            {'id': 'prio_doc', 'name': '02_translated', 'mimeType': drive.GDOC, 'modifiedTime': '2026-11-27T10:02:00Z'},
+        ]
+        with patch.object(drive, 'children', return_value=iter(with_priority_gdoc)):
+            picked_prio_doc = drive.find_translation_file('folder1')
+        self.assertEqual(picked_prio_doc['id'], 'prio_doc')
+
     def test_download_text_record_exports_google_doc_as_text_plain(self):
         mock_files = MagicMock()
         mock_req = MagicMock()
@@ -231,7 +308,7 @@ class ManualDrivePipelineTests(unittest.TestCase):
             events.append(('poll', folder_id, kw['timeout_minutes']))
             Path(dest_path).parent.mkdir(parents=True, exist_ok=True)
             Path(dest_path).write_text('รหัส: b1\nคำต้นฉบับ: Hello!\nคำแปลไทย: สวัสดี!', encoding='utf-8')
-            return Path(dest_path), {'id': 'tr_gdoc', 'name': '02_translated', 'mimeType': drive.GDOC}, 'รหัส: b1\nคำต้นฉบับ: Hello!\nคำแปลไทย: สวัสดี!'
+            return Path(dest_path), {'id': 'tr_th66', 'name': 'แปลตอนที่66.txt', 'mimeType': 'text/plain'}, 'รหัส: b1\nคำต้นฉบับ: Hello!\nคำแปลไทย: สวัสดี!'
 
         with tempfile.TemporaryDirectory() as root, ExitStack() as stack:
             summary_file = Path(root) / 'step_summary.md'
@@ -257,20 +334,27 @@ class ManualDrivePipelineTests(unittest.TestCase):
             self.assertIn(('export_psd', '01.psd', ['สวัสดี!']), events)
             self.assertIn(('upload_psd', '01.psd', 'psd_folder_10'), events)
 
-            # Verify 2 Discord embeds: waiting + completion
-            self.assertEqual(len(discord_posts), 2)
+            # Verify 3 Discord embeds: waiting + translation found + completion
+            self.assertEqual(len(discord_posts), 3)
             self.assertIn('EP10', discord_posts[0]['title'])
-            self.assertIn('01_raw_text.txt', discord_posts[0]['description'])
-            self.assertIn('02_translated.txt', discord_posts[0]['description'])
+            self.assertIn(
+                'นำ `01_raw_text.txt` ไปแปล แล้วอัปโหลดไฟล์ `.txt` ชื่ออะไรก็ได้ (หรือสร้าง Google Doc) '
+                'ลงโฟลเดอร์ Drive เดิมได้เลย (ขอแค่ไม่ใช่ชื่อ `01_raw_text.txt`)',
+                discord_posts[0]['description'],
+            )
             self.assertIn('txt_folder_10', discord_posts[0]['url'])
-            self.assertIn('✅ เสร็จเรียบร้อย! ส่งออก PSD ขึ้น Drive แล้ว', discord_posts[1]['title'])
-            self.assertIn('psd_folder_10', discord_posts[1]['url'])
+            self.assertIn('แปลตอนที่66.txt', discord_posts[1]['description'])
+            self.assertIn('✅ เสร็จเรียบร้อย! ส่งออก PSD ขึ้น Drive แล้ว', discord_posts[2]['title'])
+            self.assertIn('psd_folder_10', discord_posts[2]['url'])
+            self.assertTrue(any('แปลตอนที่66.txt' in f['value'] for f in discord_posts[2]['fields']))
 
-            # Verify $GITHUB_STEP_SUMMARY contains both links
+            # Verify $GITHUB_STEP_SUMMARY contains links, new guidance, and picked filename
             summary = summary_file.read_text('utf-8')
             self.assertIn('https://drive.google.com/drive/folders/txt_folder_10', summary)
             self.assertIn('https://drive.google.com/file/d/raw_file_10/view', summary)
             self.assertIn('https://drive.google.com/drive/folders/psd_folder_10', summary)
+            self.assertIn('อัปโหลดไฟล์ `.txt` ชื่ออะไรก็ได้ (หรือสร้าง Google Doc)', summary)
+            self.assertIn('แปลตอนที่66.txt', summary)
 
     def test_manual_drive_timeout_exits_0_and_notifies_discord(self):
         events = []
@@ -383,8 +467,8 @@ class ManualDrivePipelineTests(unittest.TestCase):
             events.clear()
             discord_posts.clear()
 
-            # Run 2 (Re-run): 02_translated.txt now exists on Drive!
-            find_mock.return_value = {'id': 'tr_13', 'name': '02_translated.txt', 'mimeType': 'text/plain'}
+            # Run 2 (Re-run): a custom-named translation file now exists on Drive!
+            find_mock.return_value = {'id': 'tr_13', 'name': 'แปลตอนที่13.txt', 'mimeType': 'text/plain'}
             dl_imgs.side_effect = AssertionError('Re-run with cache must not re-download images')
             upsert_mock.side_effect = AssertionError('Re-run with existing translation must not re-upload 01_raw_text.txt')
             wait_mock.side_effect = AssertionError('Re-run with existing translation must not enter polling loop')
@@ -405,8 +489,11 @@ class ManualDrivePipelineTests(unittest.TestCase):
             self.assertNotIn('clean', events)
             self.assertIn(('export_psd', '01.psd', ['สู้เลย!']), events)
             self.assertIn(('upload_psd', '01.psd', 'psd_folder_13'), events)
-            self.assertEqual(len(discord_posts), 1)
-            self.assertIn('✅ เสร็จเรียบร้อย! ส่งออก PSD ขึ้น Drive แล้ว', discord_posts[0]['title'])
+            self.assertEqual(len(discord_posts), 2)
+            self.assertIn('แปลตอนที่13.txt', discord_posts[0]['description'])
+            self.assertIn('✅ เสร็จเรียบร้อย! ส่งออก PSD ขึ้น Drive แล้ว', discord_posts[1]['title'])
+            self.assertTrue(any('แปลตอนที่13.txt' in f['value'] for f in discord_posts[1]['fields']))
+            self.assertIn('แปลตอนที่13.txt', summary_file.read_text('utf-8'))
 
     def test_pipeline_error_sends_discord_error_notification(self):
         events = []
