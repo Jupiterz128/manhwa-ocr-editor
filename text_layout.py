@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import threading
+import uuid
 import cv2
 import numpy as np
 from PIL import Image
@@ -156,32 +157,68 @@ def presets_config_path():
     return Path(os.environ.get('LOCALAPPDATA',str(Path.home())))/'ManhwaOCREditor'/'font_presets.json'
 
 
+_PRESETS_LOCK=threading.RLock()
+_LEGACY_FRAME_KEY_ALIASES={
+    'thought':('think',),
+    'narration':('narr_in','narr_out'),
+    'floating':('small','sfx'),
+    'shout':('scream',),
+}
+
+
 def load_font_presets():
-    presets={name:dict(mapping) for name,mapping in DEFAULT_FONT_PRESETS.items()}
-    path=presets_config_path()
-    if path.is_file():
-        try:
-            saved=json.loads(path.read_text(encoding='utf-8'))
-            if isinstance(saved,dict):
-                for p_name,mapping in saved.items():
-                    if isinstance(mapping,dict):
+    with _PRESETS_LOCK:
+        presets={name:dict(mapping) for name,mapping in DEFAULT_FONT_PRESETS.items()}
+        path=presets_config_path()
+        if path.is_file():
+            try:
+                saved=json.loads(path.read_text(encoding='utf-8-sig'))
+                if isinstance(saved,dict):
+                    for raw_name,mapping in saved.items():
+                        p_name=str(raw_name).strip()
+                        if not p_name or not isinstance(mapping,dict):
+                            continue
                         base=dict(DEFAULT_FONT_PRESETS.get(p_name,DEFAULT_FONT_PRESETS['1. มังฮวาเกาหลี']))
                         for k,_ in FRAME_TYPES:
-                            if k in mapping:
-                                base[k]=normalize_font_choice(mapping[k])
+                            raw_val=mapping.get(k)
+                            if raw_val is None or (isinstance(raw_val,str) and not raw_val.strip()):
+                                for alias_k in _LEGACY_FRAME_KEY_ALIASES.get(k,()):
+                                    cand=mapping.get(alias_k)
+                                    if cand is not None and str(cand).strip():
+                                        raw_val=cand
+                                        break
+                            if raw_val is not None and str(raw_val).strip():
+                                base[k]=normalize_preset_font(raw_val,default=base[k])
                         presets[p_name]=base
-        except Exception:
-            pass
-    return presets
+            except Exception:
+                pass
+        return {name:dict(mapping) for name,mapping in presets.items()}
 
 
 def save_font_presets(presets):
-    path=presets_config_path()
-    path.parent.mkdir(parents=True,exist_ok=True)
-    clean={}
-    for p_name,mapping in presets.items():
-        clean[p_name]={k:normalize_font_choice(mapping.get(k,FONT_NAME)) for k,_ in FRAME_TYPES}
-    path.write_text(json.dumps(clean,ensure_ascii=False,indent=2),encoding='utf-8')
+    with _PRESETS_LOCK:
+        path=presets_config_path()
+        path.parent.mkdir(parents=True,exist_ok=True)
+        clean={}
+        for raw_name,mapping in (presets or {}).items():
+            p_name=str(raw_name).strip()
+            if not p_name or not isinstance(mapping,dict):
+                continue
+            defaults=DEFAULT_FONT_PRESETS.get(p_name,DEFAULT_FONT_PRESETS['1. มังฮวาเกาหลี'])
+            clean[p_name]={
+                k:normalize_preset_font(mapping.get(k),default=defaults.get(k,FONT_NAME))
+                for k,_ in FRAME_TYPES
+            }
+        payload=json.dumps(clean,ensure_ascii=False,indent=2)
+        tmp=path.with_name(f'{path.name}.{uuid.uuid4().hex[:10]}.tmp')
+        try:
+            with tmp.open('w',encoding='utf-8',newline='\n') as fh:
+                fh.write(payload)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp,path)
+        finally:
+            tmp.unlink(missing_ok=True)
 
 
 _TYPE_CLASSES=('normal','shout','thought','system','narration','floating')
@@ -643,47 +680,72 @@ def _normalize_offset(offset):
     return [dx,dy] if (abs(dx)>=0.5 or abs(dy)>=0.5) else []
 
 
+_FONT_CHOICES_CASEFOLD={name.strip().casefold():name for name in FONT_CHOICES}
+_FONT_ALIAS_MAP={
+    'mnkrasip':'MN KRASIP',
+    'mnkrasipregular':'MN KRASIP',
+    'mnkrasipbold':'MN KRASIP',
+    'krasip':'MN KRASIP',
+    'thsarabunnewbold':'TH Sarabun New Bold',
+    'thsarabunnew':'TH Sarabun New Bold',
+    'fcmuffin':'FC Muffin',
+    'fcmuffinregular':'FC Muffin',
+    'fcmuffinbold':'FC Muffin',
+    'itim':'Itim',
+    'itimregular':'Itim',
+    'tfmaniwika':'TF MANIWIKA',
+    'tfmanawika':'TF MANIWIKA',
+    'jstoomtam':'JS Toomtam',
+    'edmuzazhi':'EDMuzazhi',
+    'tflanna':'TF LANNA',
+    'tflannabold':'TF LANNA',
+    'tfphetai':'TF PHETAI',
+    'tfphethai':'TF PHETAI',
+    'tfphethaibold':'TF PHETAI',
+    'tfphethaiitalic':'TF Phethai Italic',
+    'tfphetaiitalic':'TF Phethai Italic',
+    'iannnnntiger':'iannnnn-TIGER',
+    '2005iannnnntiger':'iannnnn-TIGER',
+    'layijitamaitine1':'Layiji TaMaiTine1',
+    'layijitamaitine':'Layiji TaMaiTine1',
+    'tamaitine1':'Layiji TaMaiTine1',
+    'layijijarakefadhang':'Layiji JaRaKeFadHang',
+    'jarakefadhang':'Layiji JaRaKeFadHang',
+    'thbaijambold':'TH Baijam Bold',
+    'thbaijam':'TH Baijam Bold',
+    'baijambold':'TH Baijam Bold',
+    'irisupcbold':'IrisUPC Bold',
+    'irisupc':'IrisUPC Bold',
+    'upcib':'IrisUPC Bold',
+}
+
+
+def normalize_preset_font(choice, default=FONT_NAME):
+    """Match known font names (exact, case-insensitive+trim, or alias) while preserving unlisted custom names."""
+    if choice is None:
+        return default
+    text=str(choice).strip()
+    if not text:
+        return default
+    if text in FONT_CHOICES:
+        return text
+    ci=_FONT_CHOICES_CASEFOLD.get(text.casefold())
+    if ci:
+        return ci
+    slug=_slug(Path(text).stem if text.lower().endswith(('.ttf','.otf')) else text)
+    if slug in _FONT_ALIAS_MAP:
+        return _FONT_ALIAS_MAP[slug]
+    return text
+
+
 def normalize_font_choice(choice):
     if not choice:return FONT_NAME
     text=str(choice).strip()
     if text in FONT_CHOICES:return text
+    ci=_FONT_CHOICES_CASEFOLD.get(text.casefold())
+    if ci:return ci
     slug=_slug(Path(text).stem if text.lower().endswith(('.ttf','.otf')) else text)
-    if slug in ('mnkrasip','mnkrasipregular','mnkrasipbold','krasip'):
-        return 'MN KRASIP'
-    alias_map={
-        'thsarabunnewbold':'TH Sarabun New Bold',
-        'thsarabunnew':'TH Sarabun New Bold',
-        'fcmuffin':'FC Muffin',
-        'fcmuffinregular':'FC Muffin',
-        'fcmuffinbold':'FC Muffin',
-        'itim':'Itim',
-        'itimregular':'Itim',
-        'tfmaniwika':'TF MANIWIKA',
-        'tfmanawika':'TF MANIWIKA',
-        'jstoomtam':'JS Toomtam',
-        'edmuzazhi':'EDMuzazhi',
-        'tflanna':'TF LANNA',
-        'tflannabold':'TF LANNA',
-        'tfphetai':'TF PHETAI',
-        'tfphethai':'TF PHETAI',
-        'tfphethaibold':'TF PHETAI',
-        'tfphethaiitalic':'TF Phethai Italic',
-        'tfphetaiitalic':'TF Phethai Italic',
-        'iannnnntiger':'iannnnn-TIGER',
-        '2005iannnnntiger':'iannnnn-TIGER',
-        'layijitamaitine1':'Layiji TaMaiTine1',
-        'layijitamaitine':'Layiji TaMaiTine1',
-        'tamaitine1':'Layiji TaMaiTine1',
-        'layijijarakefadhang':'Layiji JaRaKeFadHang',
-        'jarakefadhang':'Layiji JaRaKeFadHang',
-        'thbaijambold':'TH Baijam Bold',
-        'thbaijam':'TH Baijam Bold',
-        'baijambold':'TH Baijam Bold',
-        'irisupcbold':'IrisUPC Bold',
-        'irisupc':'IrisUPC Bold',
-        'upcib':'IrisUPC Bold',
-    }
-    return alias_map.get(slug,FONT_NAME)
+    return _FONT_ALIAS_MAP.get(slug,FONT_NAME)
 
 
 def _font_roots():

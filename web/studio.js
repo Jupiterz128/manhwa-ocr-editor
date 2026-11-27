@@ -1,7 +1,7 @@
 'use strict';
 const $=id=>document.getElementById(id), el=(tag,txt)=>Object.assign(document.createElement(tag),{textContent:txt??''});
 const btn=(text,fn)=>{let b=el('button',text);b.onclick=()=>run(fn);return b};
-let key='',pages=[],fonts=[],fontPresets={},selectedPreset=localStorage.getItem('studio-preset')||'',n=0,id='',view='original',zoom=1,move=false,drawFrame=false,maskEdit=false,maskPreviewOn=false,hasMaskPreview=false,prevView='clean',prevMove=false,compareOriginal=false,origImgKey='',erase=false,revision=0,busy=false,jsonPath='';
+let key='',pages=[],fonts=[],availableFonts=[],fontPresets={},presetsVersion=0,presetsLoadPromise=null,selectedPreset=localStorage.getItem('studio-preset')||'',n=0,id='',view='original',zoom=1,move=false,drawFrame=false,maskEdit=false,maskPreviewOn=false,hasMaskPreview=false,prevView='clean',prevMove=false,compareOriginal=false,origImgKey='',erase=false,revision=0,busy=false,jsonPath='';
 let ocrLang=sessionStorage.getItem('studio-ocr-lang')||'ko+en';
 let ocrEngine=sessionStorage.getItem('studio-ocr-engine')||'rapid';
 const FRAME_OPTIONS=[
@@ -55,7 +55,7 @@ async function flush(){
   chain=chain.catch(()=>{}).then(async()=>{
    const res=await api(p.key+'/page/'+p.n+'/edit',{...p.data,id:p.id});
    if(key===p.key){
-    if(res.presets)fontPresets=res.presets;
+    if(res.presets){presetsVersion++;fontPresets=clonePresetsMap(res.presets)}
     for(const [idx,pg] of Object.entries(res.following_pages||{}))pages[idx]=pg
    }
    if(key===p.key && !pending && !drag && !sliderDragging && p.seq===editSeq){
@@ -70,26 +70,131 @@ function statusOf(b){
  if(!(b.translation||'').trim())return {cls:'st-untranslated',label:'รอแปล',pill:'รอแปล'};
  return {cls:'st-ready',label:'แปลแล้ว',pill:'OK'};
 }
-async function loadPresets(){
- try{
-  const res=await api('font-presets');
-  fontPresets=res.presets||{};
-  if(!fonts.length&&res.fonts){fonts=res.fonts;syncFontOptions()}
-  renderPresets();
- }catch{}
+const FONT_NAME_ALIASES={
+ mnkrasip:'MN KRASIP',mnkrasipregular:'MN KRASIP',mnkrasipbold:'MN KRASIP',krasip:'MN KRASIP',
+ thsarabunnewbold:'TH Sarabun New Bold',thsarabunnew:'TH Sarabun New Bold',
+ fcmuffin:'FC Muffin',fcmuffinregular:'FC Muffin',fcmuffinbold:'FC Muffin',
+ itim:'Itim',itimregular:'Itim',
+ tfmaniwika:'TF MANIWIKA',tfmanawika:'TF MANIWIKA',
+ jstoomtam:'JS Toomtam',edmuzazhi:'EDMuzazhi',
+ tflanna:'TF LANNA',tflannabold:'TF LANNA',
+ tfphetai:'TF PHETAI',tfphethai:'TF PHETAI',tfphethaibold:'TF PHETAI',
+ tfphethaiitalic:'TF Phethai Italic',tfphetaiitalic:'TF Phethai Italic',
+ iannnnntiger:'iannnnn-TIGER','2005iannnnntiger':'iannnnn-TIGER',
+ layijitamaitine1:'Layiji TaMaiTine1',layijitamaitine:'Layiji TaMaiTine1',tamaitine1:'Layiji TaMaiTine1',
+ layijijarakefadhang:'Layiji JaRaKeFadHang',jarakefadhang:'Layiji JaRaKeFadHang',
+ thbaijambold:'TH Baijam Bold',thbaijam:'TH Baijam Bold',baijambold:'TH Baijam Bold',
+ irisupcbold:'IrisUPC Bold',irisupc:'IrisUPC Bold',upcib:'IrisUPC Bold'
+};
+function fontSlug(value){
+ return String(value??'').trim().replace(/\.(ttf|otf)$/i,'').toLowerCase().replace(/[^a-z0-9]+/g,'');
+}
+function cloneProfileFonts(mapping){
+ const out={};
+ if(mapping&&typeof mapping==='object'){
+  for(const [k,v] of Object.entries(mapping))out[k]=v==null?'':String(v);
+ }
+ return out;
+}
+function cloneProfileRecord(profileId,mapping){
+ return {id:String(profileId||''),fonts:cloneProfileFonts(mapping)};
+}
+function clonePresetsMap(raw){
+ const out={};
+ if(raw&&typeof raw==='object'){
+  for(const [pid,mapping] of Object.entries(raw)){
+   if(mapping&&typeof mapping==='object')out[pid]=cloneProfileFonts(mapping);
+  }
+ }
+ return out;
+}
+function resolveFontOption(rawName,optionList){
+ const trimmed=String(rawName??'').trim();
+ if(!trimmed)return {value:'',missing:false};
+ const list=Array.isArray(optionList)?optionList:[];
+ if(list.includes(trimmed))return {value:trimmed,missing:false};
+ const lower=trimmed.toLowerCase();
+ const ci=list.find(x=>String(x).trim().toLowerCase()===lower);
+ if(ci)return {value:ci,missing:false};
+ const slug=fontSlug(trimmed);
+ if(slug){
+  const alias=FONT_NAME_ALIASES[slug];
+  if(alias){
+   const aliasMatch=list.find(x=>x===alias||String(x).trim().toLowerCase()===alias.toLowerCase());
+   if(aliasMatch)return {value:aliasMatch,missing:false};
+  }
+  const slugMatch=list.find(x=>fontSlug(x)===slug);
+  if(slugMatch)return {value:slugMatch,missing:false};
+ }
+ return {value:trimmed,missing:true};
+}
+function fillFontSelect(node,fontList,savedValue,fallbackValue=''){
+ const list=Array.isArray(fontList)?[...fontList]:[];
+ const opts=list.map(x=>new Option(x,x));
+ let resolved=resolveFontOption(savedValue,list);
+ if(!resolved.value&&fallbackValue)resolved=resolveFontOption(fallbackValue,list);
+ if(resolved.value&&resolved.missing){
+  const tempOpt=new Option(resolved.value+' (ฟอนต์เดิมในโปรไฟล์)',resolved.value);
+  tempOpt.dataset.preservedFont='1';
+  opts.push(tempOpt);
+ }
+ node.replaceChildren(...opts);
+ if(resolved.value)node.value=resolved.value;
+ return resolved.value;
+}
+function setFontSelectValue(node,savedValue){
+ if(!node)return '';
+ const optionValues=Array.from(node.options).filter(o=>!o.dataset.preservedFont).map(o=>o.value);
+ const list=optionValues.length?optionValues:[...availableFonts];
+ const resolved=resolveFontOption(savedValue,list);
+ if(!resolved.value)return '';
+ for(const o of Array.from(node.options)){
+  if(o.dataset.preservedFont&&o.value!==resolved.value)o.remove();
+ }
+ if(resolved.missing&&!Array.from(node.options).some(o=>o.value===resolved.value)){
+  const tempOpt=new Option(resolved.value+' (ฟอนต์เดิมในโปรไฟล์)',resolved.value);
+  tempOpt.dataset.preservedFont='1';
+  node.append(tempOpt);
+ }
+ if(node.value!==resolved.value)node.value=resolved.value;
+ return resolved.value;
+}
+async function loadPresets(force=false){
+ if(presetsLoadPromise&&!force)return presetsLoadPromise;
+ const reqVer=++presetsVersion;
+ const task=(async()=>{
+  try{
+   const res=await api('font-presets');
+   if(reqVer!==presetsVersion)return;
+   fontPresets=clonePresetsMap(res.presets||{});
+   if(Array.isArray(res.fonts)&&res.fonts.length){
+    availableFonts=[...res.fonts];
+    fonts=[...res.fonts];
+    syncFontOptions();
+   }
+   renderPresets();
+  }catch{}
+  finally{
+   if(presetsLoadPromise===task)presetsLoadPromise=null;
+  }
+ })();
+ presetsLoadPromise=task;
+ return task;
 }
 function renderPresets(){
  let sel=$('presetSelect');if(!sel)return;
  const names=Object.keys(fontPresets);
  sel.replaceChildren(...names.map(x=>new Option(x,x)));
  if(names.length){
-  if(!selectedPreset||!fontPresets[selectedPreset])selectedPreset=names[0];
+  if(!selectedPreset||!Object.prototype.hasOwnProperty.call(fontPresets,selectedPreset))selectedPreset=names[0];
   sel.value=selectedPreset;
   localStorage.setItem('studio-preset',selectedPreset);
  }
 }
 $('presetSelect').onchange=()=>run(async()=>{
- selectedPreset=$('presetSelect').value;
+ const nextPreset=$('presetSelect').value;
+ if(!nextPreset||!Object.prototype.hasOwnProperty.call(fontPresets,nextPreset))return;
+ selectedPreset=nextPreset;
  localStorage.setItem('studio-preset',selectedPreset);
  if(key){
   const res=await api(key+'/font-preset',{preset:selectedPreset});
@@ -105,9 +210,16 @@ async function project(k,title){
  if(strokeModalOpen)closeStrokeModal(false);
  await flush();
  if(maskEdit)await cancelMaskEdit(true);
- let st=await api(k+'/state');key=k;localStorage.setItem('studio-project',k);pages=st.pages;fonts=st.fonts;jsonPath=st.json_path||'';
+ let st=await api(k+'/state');key=k;localStorage.setItem('studio-project',k);pages=st.pages;
+ if(Array.isArray(st.fonts)&&st.fonts.length){availableFonts=[...st.fonts];fonts=[...st.fonts]}
+ jsonPath=st.json_path||'';
+ if(!Object.keys(fontPresets).length||!availableFonts.length)await loadPresets();
  syncFontOptions();
- if(st.font_preset){selectedPreset=st.font_preset;localStorage.setItem('studio-preset',selectedPreset);renderPresets()}
+ if(st.font_preset&&Object.prototype.hasOwnProperty.call(fontPresets,st.font_preset)){
+  selectedPreset=st.font_preset;
+  localStorage.setItem('studio-preset',selectedPreset);
+  renderPresets();
+ }
  $('projectName').textContent=title;n=0;id=page()?.bubbles[0]?.id||'';drawFrame=false;maskEdit=false;compareOriginal=false;origImgKey='';fit();refresh()
 }
 async function projectList(){
@@ -302,19 +414,18 @@ let barFrame=0,barTarget='',barPin=null,barDrag=null,barTransitionTimer=0;
 let textBarFrame=0,textBarTarget='',textBarPin=null,textBarDrag=null,mountedFontsSig='';
 
 function syncFontOptions(){
- const sig=fonts.join('\0');
- if(!fonts.length||sig===mountedFontsSig)return;
+ const list=availableFonts.length?availableFonts:fonts;
+ const sig=list.join('\0');
+ if(!list.length||sig===mountedFontsSig)return;
  mountedFontsSig=sig;
  if(tbFont){
   const cur=tbFont.value;
-  tbFont.replaceChildren(...fonts.map(x=>new Option(x,x)));
-  if(cur&&fonts.includes(cur))tbFont.value=cur;
+  fillFontSelect(tbFont,list,cur);
  }
  const inspFont=$('font');
  if(inspFont){
   const cur=inspFont.value;
-  inspFont.replaceChildren(...fonts.map(x=>new Option(x,x)));
-  if(cur&&fonts.includes(cur))inspFont.value=cur;
+  fillFontSelect(inspFont,list,cur);
  }
 }
 
@@ -329,7 +440,7 @@ function syncTextBarValues(){
  syncFontOptions();
  if(tbFont){
   const want=b.font_choice||fonts[0]||'';
-  if(tbFont.value!==want)tbFont.value=want;
+  setFontSelectValue(tbFont,want);
  }
  if(tbColor){
   const hex=rgb(l.color);
@@ -408,9 +519,10 @@ function applyTypographyFont(b,fontVal){
  if(!b||!fontVal)return;
  b.font_choice=fontVal;
  if(b.text_layer)b.text_layer.font_choice=fontVal;
- if($('font')&&$('font').value!==fontVal)$('font').value=fontVal;
- if(tbFont&&tbFont.value!==fontVal)tbFont.value=fontVal;
- queueEdit({font_choice:fontVal});run(flush);
+ setFontSelectValue($('font'),fontVal);
+ setFontSelectValue(tbFont,fontVal);
+ const activeP=$('presetSelect')?.value||selectedPreset;
+ queueEdit(activeP?{font_choice:fontVal,font_preset:activeP}:{font_choice:fontVal});run(flush);
  applyLiveBubbleStyle();
 }
 function applyTypographyColor(b,hexVal,commit=true,flushNow=false){
@@ -1356,10 +1468,13 @@ function mountInspectorOnce(){
   const ft=$('frame').value, activeP=$('presetSelect')?.value||selectedPreset;
   b.frame_type=ft;$('frameBadge').textContent=FRAME_SHORT[ft]||ft;
   const mapped=fontPresets[activeP]?.[ft];
-  if(mapped&&fonts.includes(mapped)){
-   b.font_choice=mapped;if(b.text_layer)b.text_layer.font_choice=mapped;
-   if($('font'))$('font').value=mapped;
-   if(tbFont)tbFont.value=mapped;
+  if(mapped){
+   const resolved=resolveFontOption(mapped,availableFonts.length?availableFonts:fonts);
+   if(resolved.value&&!resolved.missing){
+    b.font_choice=resolved.value;if(b.text_layer)b.text_layer.font_choice=resolved.value;
+    setFontSelectValue($('font'),resolved.value);
+    setFontSelectValue(tbFont,resolved.value);
+   }
   }
   draw();
   queueEdit({frame_type:ft,font_preset:activeP});
@@ -1481,7 +1596,7 @@ function inspect(){
  $('score').textContent='OCR '+pct+'%';
  $('score').className=pct<90?'score-low':'score-ok';
  $('frame').value=ft;
- $('font').value=b.font_choice||fonts[0]||'';
+ setFontSelectValue($('font'),b.font_choice||fonts[0]||'');
  $('source').value=b.text;$('thai').value=b.translation;$('ink').value=rgb(l.color);$('rotation').value=l.rotation||0;$('align').value=l.alignment||'center';$('size').value=l.font_size||24;$('sizeValue').value=$('size').value;
  updateCoordInfo();
  $('stroke').checked=!!s.enabled;
@@ -2469,10 +2584,18 @@ async function applyFontPreset(){
  },'กำลังจัดฟอนต์ตามโปรไฟล์…')
 }
 async function openPresetEditor(isNew=false){
- if(!Object.keys(fontPresets).length)await loadPresets();
- const current=$('presetSelect')?.value||selectedPreset||Object.keys(fontPresets)[0]||'1. มังฮวาเกาหลี';
- const baseMap=fontPresets[current]||{};
- let m=modal(isNew?'เพิ่มโปรไฟล์ฟอนต์ใหม่':'ตั้งค่าฟอนต์ — '+current);
+ const requestedProfileId=$('presetSelect')?.value||selectedPreset||'';
+ await loadPresets(true);
+ const names=Object.keys(fontPresets);
+ const currentId=(requestedProfileId&&Object.prototype.hasOwnProperty.call(fontPresets,requestedProfileId))
+  ?requestedProfileId
+  :(selectedPreset&&Object.prototype.hasOwnProperty.call(fontPresets,selectedPreset)
+    ?selectedPreset
+    :(names[0]||'1. มังฮวาเกาหลี'));
+ const editingProfile=cloneProfileRecord(currentId,fontPresets[currentId]||{});
+ const fontList=availableFonts.length?[...availableFonts]:[...fonts];
+ let m=modal(isNew?'เพิ่มโปรไฟล์ฟอนต์ใหม่':'ตั้งค่าฟอนต์ — '+editingProfile.id);
+ m.dataset.profileId=editingProfile.id;
  let nameInput=null;
  if(isNew){
   let lbl=el('label','ชื่อโปรไฟล์ใหม่');
@@ -2480,25 +2603,31 @@ async function openPresetEditor(isNew=false){
   lbl.append(nameInput);m.append(lbl)
  }
  let grid=el('div');grid.className='preset-grid';
+ grid.dataset.profileId=editingProfile.id;
  const selects={};
  for(const [ftype,flabel] of FRAME_OPTIONS){
   let row=el('div');row.className='preset-row';
   row.append(el('small',flabel));
-  let s=el('select');s.dataset.ftype=ftype;
-  fillSelect(s,fonts,baseMap[ftype]||fonts[0]||'TH Sarabun New Bold');
+  let s=el('select');s.dataset.ftype=ftype;s.dataset.profileId=editingProfile.id;
+  fillFontSelect(s,fontList,editingProfile.fonts[ftype],'TH Sarabun New Bold');
   selects[ftype]=s;row.append(s);grid.append(row)
  }
  let status=el('p','');
  let actions=el('div');actions.className='modal-actions';
  let cancelBtn=btn('ยกเลิก',()=>$('dialog').close());
  let saveBtn=btn(isNew?'สร้างและบันทึกโปรไฟล์':'บันทึกโปรไฟล์',async()=>{
-  const name=isNew?nameInput.value.trim():current;
-  if(!name){status.className='err-note';status.textContent='กรุณาระบุชื่อโปรไฟล์ก่อนบันทึก';nameInput?.focus();return}
+  const targetId=isNew?nameInput.value.trim():editingProfile.id;
+  if(!targetId){status.className='err-note';status.textContent='กรุณาระบุชื่อโปรไฟล์ก่อนบันทึก';nameInput?.focus();return}
   saveBtn.disabled=true;
   try{
-   const mapping={};for(const [k,s] of Object.entries(selects))mapping[k]=s.value;
-   const res=await api('font-presets',{name,mapping});
-   fontPresets=res.presets;selectedPreset=res.name;renderPresets();
+   const draftFonts={};
+   for(const [k,s] of Object.entries(selects))draftFonts[k]=s.value;
+   const payloadProfile=cloneProfileRecord(targetId,draftFonts);
+   const res=await api('font-presets',{name:payloadProfile.id,mapping:cloneProfileFonts(payloadProfile.fonts)});
+   presetsVersion++;
+   fontPresets=clonePresetsMap(res.presets||{});
+   selectedPreset=res.name||payloadProfile.id;
+   renderPresets();
    if(key)await api(key+'/font-preset',{preset:selectedPreset});
    info(res.note);$('dialog').close()
   }catch(err){status.className='err-note';status.textContent=err.message}

@@ -34,6 +34,7 @@ from text_layout import (
     DEFAULT_FONT_PRESETS,
     FONT_CHOICES,
     FONT_NAME,
+    FRAME_TYPE_LABELS,
     FRAME_TYPES,
     _bubble_interior_region,
     classify_bubble_type,
@@ -42,6 +43,7 @@ from text_layout import (
     layout_text,
     load_font_presets,
     normalize_font_choice,
+    normalize_preset_font,
     resolve_font,
     save_font_presets,
     validate_layer,
@@ -323,7 +325,9 @@ def _load_json_project_file(json_file: Path):
         if bid not in masks:
             masks[bid] = encode_region(reg)
     title = str(data.get('name') or json_file.name)
-    preset = str(data.get('font_preset') or '').strip() or default_preset_name()
+    preset = str(data.get('font_preset') or '').strip()
+    if not preset or preset not in load_font_presets():
+        preset = default_preset_name()
     return pages, masks, title, preset
 
 
@@ -526,7 +530,8 @@ def update_font_presets(d: dict):
         if not isinstance(raw_map, dict):
             base_name = str(d.get('base') or '').strip()
             raw_map = dict(presets.get(base_name) or DEFAULT_FONT_PRESETS['1. มังฮวาเกาหลี'])
-        cleaned = {k: normalize_font_choice(raw_map.get(k, FONT_NAME)) for k, _ in FRAME_TYPES}
+        existing = dict(presets.get(name) or DEFAULT_FONT_PRESETS.get(name) or DEFAULT_FONT_PRESETS['1. มังฮวาเกาหลี'])
+        cleaned = {k: normalize_preset_font(raw_map.get(k), default=existing.get(k, FONT_NAME)) for k, _ in FRAME_TYPES}
         presets[name] = cleaned
         save_font_presets(presets)
         return dict(presets=load_font_presets(), name=name, note=f'บันทึกโปรไฟล์ฟอนต์ "{name}" แล้ว')
@@ -1265,9 +1270,12 @@ def action(key: str, n: int, action: str, d: dict):
                 extra_out['following_pages'] = {i:summary(pg) for i,pg in changed_pages.items()}
                 if 'font_choice' in d:
                     presets = load_font_presets()
-                    presets[active_preset][category] = font.choice
-                    save_font_presets(presets)
-                    extra_out['presets'] = presets
+                    if active_preset in presets and category in FRAME_TYPE_LABELS:
+                        updated_profile = dict(presets[active_preset])
+                        updated_profile[category] = font.choice
+                        presets[active_preset] = updated_profile
+                        save_font_presets(presets)
+                    extra_out['presets'] = load_font_presets()
             if 'bubble_box' in d:
                 masks.pop(b.id, None)
                 masks.pop('undo:' + b.id, None)

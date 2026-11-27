@@ -3930,47 +3930,58 @@ class ManhwaOCRApp:
 
     def open_preset_dialog(self):
         if not self.guard():return
-        from text_layout import FRAME_TYPES, FONT_CHOICES, DEFAULT_FONT_PRESETS, save_font_presets
+        from text_layout import FRAME_TYPES, FONT_CHOICES, DEFAULT_FONT_PRESETS, load_font_presets, save_font_presets
         win=tk.Toplevel(self.root)
         win.title('ตั้งค่าโปรไฟล์ฟอนต์ตามประเภทกรอบ')
         win.configure(bg='#0b1218')
         win.transient(self.root);win.grab_set()
         pad=ttk.Frame(win,padding=14);pad.pack(fill='both',expand=True)
 
+        self.font_presets_map=load_font_presets()
         profiles=copy.deepcopy(self.font_presets_map)
         active=self.font_preset.get()
+        if active not in profiles:
+            active=next(iter(profiles))
         p_var=tk.StringVar(value=active)
         top_row=ttk.Frame(pad);top_row.pack(fill='x',pady=(0,10))
         ttk.Label(top_row,text='เลือกโปรไฟล์:',foreground='#98e55b').pack(side='left',padx=(0,8))
-        p_combo=ttk.Combobox(top_row,textvariable=p_var,values=list(self.font_presets_map.keys()),state='readonly',width=22)
+        p_combo=ttk.Combobox(top_row,textvariable=p_var,values=list(profiles.keys()),state='readonly',width=22)
         p_combo.pack(side='left',fill='x',expand=True)
 
         grid_f=ttk.Frame(pad);grid_f.pack(fill='x',pady=4)
         grid_f.columnconfigure(1,weight=1)
         row_vars={}
+        row_combos={}
         for r_idx,(key,label) in enumerate(FRAME_TYPES):
             ttk.Label(grid_f,text=f'{label}:').grid(row=r_idx,column=0,sticky='w',padx=(0,12),pady=4)
             v=tk.StringVar()
-            cb=ttk.Combobox(grid_f,textvariable=v,values=FONT_CHOICES,state='readonly',width=24)
+            cb=ttk.Combobox(grid_f,textvariable=v,values=list(FONT_CHOICES),state='readonly',width=24)
             cb.grid(row=r_idx,column=1,sticky='ew',pady=4)
             row_vars[key]=v
+            row_combos[key]=cb
 
         def load_current_into_vars(*_):
             nonlocal active
             if active in profiles and row_vars['normal'].get():
                 profiles[active]={k:v.get() for k,v in row_vars.items()}
             active=p_var.get()
-            mapping=profiles.get(active,DEFAULT_FONT_PRESETS['1. มังฮวาเกาหลี'])
+            mapping=dict(profiles.get(active,DEFAULT_FONT_PRESETS['1. มังฮวาเกาหลี']))
             for k,_ in FRAME_TYPES:
-                row_vars[k].set(mapping.get(k,DEFAULT_FONT_CHOICE))
+                val=mapping.get(k,DEFAULT_FONT_CHOICE)
+                opts=list(FONT_CHOICES)
+                if val and val not in opts:
+                    opts.append(val)
+                row_combos[k].configure(values=opts)
+                row_vars[k].set(val)
 
         p_combo.bind('<<ComboboxSelected>>',load_current_into_vars)
         load_current_into_vars()
 
         def reset_default():
             name=p_var.get()
-            base=DEFAULT_FONT_PRESETS.get(name,DEFAULT_FONT_PRESETS['1. มังฮวาเกาหลี'])
+            base=dict(DEFAULT_FONT_PRESETS.get(name,DEFAULT_FONT_PRESETS['1. มังฮวาเกาหลี']))
             for k,_ in FRAME_TYPES:
+                row_combos[k].configure(values=list(FONT_CHOICES))
                 row_vars[k].set(base.get(k,DEFAULT_FONT_CHOICE))
 
         def create_profile():
@@ -4007,8 +4018,8 @@ class ManhwaOCRApp:
             except OSError as exc:
                 messagebox.showerror('บันทึกโปรไฟล์ไม่สำเร็จ',str(exc),parent=win)
                 return
-            self.font_presets_map=profiles
-            self.preset_combo.configure(values=list(profiles))
+            self.font_presets_map=load_font_presets()
+            self.preset_combo.configure(values=list(self.font_presets_map))
             self.font_preset.set(name)
             self.status.set(f'บันทึกชุดฟอนต์โปรไฟล์ "{name}" แล้ว — กดปุ่มจัดฟอนต์ตามกรอบเพื่อใช้งาน')
             win.destroy()
