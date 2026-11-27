@@ -424,12 +424,15 @@ function applyTypographyColor(b,hexVal,commit=true,flushNow=false){
  if(commit){queueEdit({color:col});if(flushNow)run(flush)}
  applyLiveBubbleStyle();
 }
+let strokeEyedropBefore=null, strokeEyedropBase=null;
 function applyStrokeColor(b,hexVal,commit=false,flushNow=false){
  if(!b||!hexVal)return;
  const hexLower=String(hexVal).toLowerCase();
  const col=triplet(hexLower);
  const l=b.text_layer||(b.text_layer={});
- const stroke=normalizeStroke(l.stroke);
+ if(!strokeEyedropBefore)strokeEyedropBefore=captureStyle(b);
+ if(!strokeEyedropBase)strokeEyedropBase=resolveStrokeForEnable(l.stroke);
+ const stroke=cloneStroke(strokeEyedropBase);
  stroke.enabled=true;
  stroke.color=col;
  if($('edge')&&$('edge').value!==hexLower)$('edge').value=hexLower;
@@ -437,8 +440,13 @@ function applyStrokeColor(b,hexVal,commit=false,flushNow=false){
  l.stroke=stroke;
  syncInspectorStrokeUi(stroke);
  if(commit){
-  const style={stroke,gradient:normalizeGradient(l.gradient)};
+  const before=strokeEyedropBefore;
+  strokeEyedropBefore=null;
+  strokeEyedropBase=null;
+  const style={stroke,gradient:cloneGradient(l.gradient)};
   Object.assign(l,style);
+  saveLastFxStroke(stroke);
+  pushStyleHistory(before,captureStyle(b),'การปรับสี Stroke');
   queueEdit({style});
   if(flushNow)run(flush);
   sidebar();
@@ -676,12 +684,51 @@ function pushTransformHistory(before,after,label='การปรับตำแ
  if(coalesceArrow)lastArrowPush={time:now,id:before.id};
  else lastArrowPush={time:0,id:''}
 }
+function captureStyle(b){
+ if(!b)return null;
+ const l=b.text_layer||{};
+ return {
+  id:b.id,
+  style:{
+   stroke:cloneStroke(l.stroke),
+   gradient:cloneGradient(l.gradient)
+  }
+ };
+}
+function sameStyleSnap(a,b){
+ if(!a||!b||a.id!==b.id)return false;
+ return JSON.stringify(a.style)===JSON.stringify(b.style);
+}
+function pushStyleHistory(before,after,label='การปรับ Layer Style'){
+ if(!before||!after||sameStyleSnap(before,after))return;
+ const h=pageHistory();
+ h.undo.push({before,after,label});
+ if(h.undo.length>60)h.undo.shift();
+ h.redo=[];
+ lastArrowPush={time:0,id:''};
+}
 async function applyTransformSnap(snap,toastMsg){
  if(!snap||!page())return;
  await flush();
  if(snap.fonts){
   const res=await api(key+'/page/'+n+'/page_font',{fonts:snap.fonts});
   pages[n]=res.page;revision++;image();inspect();sidebar();draw();info(toastMsg);return
+ }
+ if(snap.style){
+  const target=page().bubbles.find(b=>b.id===snap.id);
+  if(!target)return;
+  id=target.id;
+  const restoredStyle={
+   stroke:cloneStroke(snap.style.stroke),
+   gradient:cloneGradient(snap.style.gradient)
+  };
+  target.text_layer=target.text_layer||{};
+  Object.assign(target.text_layer,restoredStyle);
+  const res=await api(key+'/page/'+n+'/edit',{id:target.id,style:restoredStyle});
+  pages[n]=res.page;
+  sidebar();inspect();draw();
+  info(toastMsg);
+  return;
  }
  const target=page().bubbles.find(b=>b.id===snap.id);
  if(!target)return;
@@ -953,6 +1000,102 @@ function normalizeGradient(raw){
   blend_mode,
   align_with_layer:g.align_with_layer!==false
  };
+}
+const LAST_FX_STROKE_KEY='manhwa_last_fx_stroke';
+const LAST_FX_GRADIENT_KEY='manhwa_last_fx_gradient';
+function cloneStroke(raw){
+ const s=normalizeStroke(raw);
+ return {enabled:!!s.enabled,color:[...s.color],size:s.size,position:s.position,opacity:s.opacity,blend_mode:s.blend_mode};
+}
+function cloneGradient(raw){
+ const g=normalizeGradient(raw);
+ return {
+  enabled:!!g.enabled,
+  start_color:[...g.start_color],
+  end_color:[...g.end_color],
+  stops:g.stops.map(st=>({pos:st.pos,color:st.color})),
+  angle:g.angle,
+  scale:g.scale,
+  opacity:g.opacity,
+  reverse:!!g.reverse,
+  style:g.style,
+  blend_mode:g.blend_mode,
+  align_with_layer:g.align_with_layer!==false
+ };
+}
+function isDefaultStrokeParams(raw){
+ const s=normalizeStroke(raw);
+ return s.color[0]===255&&s.color[1]===255&&s.color[2]===255
+  && s.size===3 && s.position==='outside' && s.opacity===100 && s.blend_mode==='Normal';
+}
+function isDefaultGradientParams(raw){
+ const g=normalizeGradient(raw);
+ return g.stops.length===2
+  && g.stops[0].pos===0 && g.stops[0].color==='#FFFFFF'
+  && g.stops[1].pos===100 && g.stops[1].color==='#C8C8C8'
+  && g.angle===90 && g.scale===100 && g.opacity===100
+  && !g.reverse && g.style==='linear' && g.blend_mode==='normal' && g.align_with_layer===true;
+}
+function hasOwnStroke(raw){
+ if(!raw||typeof raw!=='object')return false;
+ return !!raw.enabled || !isDefaultStrokeParams(raw);
+}
+function hasOwnGradient(raw){
+ if(!raw||typeof raw!=='object')return false;
+ return !!raw.enabled || !isDefaultGradientParams(raw);
+}
+function loadLastFxStroke(){
+ try{
+  const raw=localStorage.getItem(LAST_FX_STROKE_KEY);
+  if(!raw)return null;
+  const parsed=JSON.parse(raw);
+  if(!parsed||typeof parsed!=='object')return null;
+  return cloneStroke({...parsed,enabled:true});
+ }catch{return null}
+}
+function saveLastFxStroke(stroke){
+ if(!stroke||typeof stroke!=='object')return;
+ const s=cloneStroke(stroke);
+ const payload={color:[...s.color],size:s.size,position:s.position,opacity:s.opacity,blend_mode:s.blend_mode};
+ try{localStorage.setItem(LAST_FX_STROKE_KEY,JSON.stringify(payload))}catch{}
+}
+function loadLastFxGradient(){
+ try{
+  const raw=localStorage.getItem(LAST_FX_GRADIENT_KEY);
+  if(!raw)return null;
+  const parsed=JSON.parse(raw);
+  if(!parsed||typeof parsed!=='object')return null;
+  return cloneGradient({...parsed,enabled:true});
+ }catch{return null}
+}
+function saveLastFxGradient(grad){
+ if(!grad||typeof grad!=='object')return;
+ const g=cloneGradient(grad);
+ const payload={
+  start_color:[...g.start_color],
+  end_color:[...g.end_color],
+  stops:g.stops.map(st=>({pos:st.pos,color:st.color})),
+  angle:g.angle,
+  scale:g.scale,
+  opacity:g.opacity,
+  reverse:g.reverse,
+  style:g.style,
+  blend_mode:g.blend_mode,
+  align_with_layer:g.align_with_layer
+ };
+ try{localStorage.setItem(LAST_FX_GRADIENT_KEY,JSON.stringify(payload))}catch{}
+}
+function resolveStrokeForEnable(raw){
+ if(hasOwnStroke(raw))return cloneStroke({...raw,enabled:true});
+ const last=loadLastFxStroke();
+ if(last)return cloneStroke({...last,enabled:true});
+ return cloneStroke({enabled:true});
+}
+function resolveGradientForEnable(raw){
+ if(hasOwnGradient(raw))return cloneGradient({...raw,enabled:true});
+ const last=loadLastFxGradient();
+ if(last)return cloneGradient({...last,enabled:true});
+ return cloneGradient({enabled:true});
 }
 function sampleGradientAt(stops,posPct){
  const sorted=[...stops].sort((a,b)=>a.pos-b.pos);
@@ -1231,22 +1374,79 @@ function mountInspectorOnce(){
  $('size').oninput=()=>{const b=bubble();if(!b)return;let v=+$('size').value;$('sizeValue').value=v;if(tbSize)tbSize.value=v;layer().font_size=v;layer().auto_leading=true;applyLiveBubbleStyle()};
  $('size').onchange=()=>{sliderDragging=false;const b=bubble();if(!b)return;let v=+$('size').value;applyTypographySize(b,v,true,inspectorSizeBefore);inspectorSizeBefore=null};
  $('size').onpointerup=$('size').onpointercancel=()=>{sliderDragging=false};
- $('edge').onpointerdown=$('edge').onfocus=()=>{lastColorTarget='stroke'};
+ let edgeBeforeStyle=null, edgeBaseStroke=null;
+ $('edge').onpointerdown=$('edge').onfocus=()=>{
+  lastColorTarget='stroke';
+  const b=bubble();
+  if(b&&!edgeBeforeStyle){
+   edgeBeforeStyle=captureStyle(b);
+   const l=b.text_layer||{};
+   edgeBaseStroke=resolveStrokeForEnable(l.stroke);
+  }
+ };
+ $('edge').oninput=()=>{
+  lastColorTarget='stroke';
+  const b=bubble();if(!b)return;
+  const l=b.text_layer||(b.text_layer={});
+  if(!edgeBeforeStyle){
+   edgeBeforeStyle=captureStyle(b);
+   edgeBaseStroke=resolveStrokeForEnable(l.stroke);
+  }
+  const s=cloneStroke(edgeBaseStroke);
+  s.enabled=true;
+  s.color=triplet($('edge').value);
+  if($('stroke')&&!$('stroke').checked)$('stroke').checked=true;
+  const style={stroke:s,gradient:cloneGradient(l.gradient)};
+  Object.assign(l,style);
+  saveLastFxStroke(s);
+  syncInspectorStrokeUi(s);
+  queueEdit({style});
+  if(view!=='thai'&&!compareOriginal&&b.translation?.trim()){view='thai';image();draw();bars()}
+  else applyLiveBubbleStyle();
+  sidebar();
+ };
+ $('edge').onchange=()=>{
+  const b=bubble();
+  if(b&&edgeBeforeStyle){
+   pushStyleHistory(edgeBeforeStyle,captureStyle(b),'การปรับสี Stroke');
+   run(flush);
+  }
+  edgeBeforeStyle=null;
+  edgeBaseStroke=null;
+ };
+ $('edge').onblur=()=>{edgeBeforeStyle=null;edgeBaseStroke=null};
  $('stroke').onpointerdown=$('stroke').onfocus=()=>{lastColorTarget='stroke'};
- $('stroke').onchange=$('edge').oninput=$('gradient').onchange=e=>{
-  if(e?.target===$('edge')||e?.target===$('stroke'))lastColorTarget='stroke';
-  const b=bubble(),l=layer();if(!b)return;
-  const s=normalizeStroke(l.stroke);
-  s.enabled=$('stroke').checked;
-  if($('edge'))s.color=triplet($('edge').value);
-  const g=normalizeGradient(l.gradient);
-  g.enabled=$('gradient').checked;
-  let style={stroke:s,gradient:g};
+ $('stroke').onchange=()=>{
+  lastColorTarget='stroke';
+  const b=bubble();if(!b)return;
+  const l=b.text_layer||(b.text_layer={});
+  const before=captureStyle(b);
+  const on=$('stroke').checked;
+  const s=on?resolveStrokeForEnable(l.stroke):cloneStroke({...l.stroke,enabled:false});
+  const style={stroke:s,gradient:cloneGradient(l.gradient)};
   Object.assign(l,style);
   syncInspectorStrokeUi(s);
-  syncInspectorGradSwatch(g);
+  pushStyleHistory(before,captureStyle(b),'การปรับ Stroke');
   queueEdit({style});
-  applyLiveBubbleStyle();
+  run(flush);
+  if(on&&view!=='thai'&&!compareOriginal&&b.translation?.trim()){view='thai';image();draw();bars()}
+  else applyLiveBubbleStyle();
+  sidebar();
+ };
+ $('gradient').onchange=()=>{
+  const b=bubble();if(!b)return;
+  const l=b.text_layer||(b.text_layer={});
+  const before=captureStyle(b);
+  const on=$('gradient').checked;
+  const g=on?resolveGradientForEnable(l.gradient):cloneGradient({...l.gradient,enabled:false});
+  const style={stroke:cloneStroke(l.stroke),gradient:g};
+  Object.assign(l,style);
+  syncInspectorGradSwatch(g);
+  pushStyleHistory(before,captureStyle(b),'การปรับ Gradient Overlay');
+  queueEdit({style});
+  run(flush);
+  if(on&&view!=='thai'&&!compareOriginal&&b.translation?.trim()){view='thai';image();draw();bars()}
+  else applyLiveBubbleStyle();
   sidebar();
  };
  $('openStrokeBtn').onclick=()=>openStrokeModal();
@@ -1297,7 +1497,7 @@ const gmBar=$('gmBar'), gmStops=$('gmStops'), gmStopColor=$('gmStopColor'), gmSt
 const gmStyle=$('gmStyle'), gmDial=$('gmDial'), gmDialNeedle=$('gmDialNeedle'), gmAngle=$('gmAngle'), gmAngleNum=$('gmAngleNum');
 const gmScale=$('gmScale'), gmScaleNum=$('gmScaleNum'), gmAlign=$('gmAlign');
 
-let gradModalOpen=false, gradDraft=null, gradSnapshot=null, gradSelectedIdx=0;
+let gradModalOpen=false, gradDraft=null, gradSnapshot=null, gradBeforeStyle=null, gradSelectedIdx=0;
 let gradPos={x:0,y:0}, gradWinDrag=null, gradWinFrame=0, gradStopDrag=null, gradDialDrag=null;
 
 function scheduleGradModalPos(){
@@ -1433,9 +1633,9 @@ function openGradModal(){
  if(strokeModalOpen)closeStrokeModal(false);
  if(view!=='thai'){view='thai';compareOriginal=false;image();draw();bars()}
  const l=b.text_layer||(b.text_layer={});
- gradSnapshot=l.gradient?JSON.parse(JSON.stringify(l.gradient)):null;
- gradDraft=normalizeGradient(l.gradient);
- gradDraft.enabled=true;
+ gradBeforeStyle=captureStyle(b);
+ gradSnapshot=l.gradient?cloneGradient(l.gradient):null;
+ gradDraft=resolveGradientForEnable(l.gradient);
  gradSelectedIdx=0;
  gradModalOpen=true;
  gmBlend.value=gradDraft.blend_mode;
@@ -1475,30 +1675,28 @@ function closeGradModal(commit){
  gradModal.classList.remove('visible');
  if(altHeld)releaseAltEyedropper();else syncEyedropperUi();
  const b=bubble();
- if(!b){gradDraft=null;gradSnapshot=null;return}
+ if(!b){gradDraft=null;gradSnapshot=null;gradBeforeStyle=null;return}
  const l=b.text_layer||(b.text_layer={});
  if(commit&&gradDraft){
   gradDraft.stops.sort((a,b)=>a.pos-b.pos);
-  gradDraft.start_color=hexToRgb(gradDraft.stops[0].color);
-  gradDraft.end_color=hexToRgb(gradDraft.stops[gradDraft.stops.length-1].color);
-  gradDraft.enabled=true;
-  const stroke=normalizeStroke(l.stroke);
-  if($('stroke'))stroke.enabled=$('stroke').checked;
-  if($('edge'))stroke.color=triplet($('edge').value);
-  const style={stroke,gradient:gradDraft};
+  const gradient=cloneGradient({...gradDraft,enabled:true});
+  const stroke=cloneStroke(l.stroke);
+  const style={stroke,gradient};
   Object.assign(l,style);
+  saveLastFxGradient(gradient);
   if($('gradient'))$('gradient').checked=true;
-  syncInspectorGradSwatch(gradDraft);
+  syncInspectorGradSwatch(gradient);
+  pushStyleHistory(gradBeforeStyle,captureStyle(b),'การปรับ Gradient Overlay');
   queueEdit({style});run(flush);
   sidebar();applyLiveBubbleStyle();
  }else{
-  const restored=gradSnapshot?normalizeGradient(gradSnapshot):normalizeGradient(null);
+  const restored=gradSnapshot?cloneGradient(gradSnapshot):cloneGradient(null);
   l.gradient=restored;
   if($('gradient'))$('gradient').checked=!!restored.enabled;
   syncInspectorGradSwatch(restored);
   applyLiveBubbleStyle();
  }
- gradDraft=null;gradSnapshot=null;
+ gradDraft=null;gradSnapshot=null;gradBeforeStyle=null;
 }
 
 gradHeader.onpointerdown=e=>{
@@ -1585,7 +1783,7 @@ const strokeModal=$('strokeModal'), strokeHeader=$('strokeHeader'), smClose=$('s
 const smSize=$('smSize'), smSizeNum=$('smSizeNum'), smPosition=$('smPosition'), smBlend=$('smBlend');
 const smOpacity=$('smOpacity'), smOpacityNum=$('smOpacityNum'), smColor=$('smColor'), smColorHex=$('smColorHex');
 
-let strokeModalOpen=false, strokeDraft=null, strokeSnapshot=null;
+let strokeModalOpen=false, strokeDraft=null, strokeSnapshot=null, strokeBeforeStyle=null;
 let strokePos={x:0,y:0}, strokeWinDrag=null, strokeWinFrame=0;
 
 function scheduleStrokeModalPos(){
@@ -1628,9 +1826,9 @@ function openStrokeModal(){
  if(gradModalOpen)closeGradModal(false);
  if(view!=='thai'){view='thai';compareOriginal=false;image();draw();bars()}
  const l=b.text_layer||(b.text_layer={});
- strokeSnapshot=l.stroke?JSON.parse(JSON.stringify(l.stroke)):null;
- strokeDraft=normalizeStroke(l.stroke);
- strokeDraft.enabled=true;
+ strokeBeforeStyle=captureStyle(b);
+ strokeSnapshot=l.stroke?cloneStroke(l.stroke):null;
+ strokeDraft=resolveStrokeForEnable(l.stroke);
  strokeModalOpen=true;
  lastColorTarget='stroke';
  const hexUpper=rgbToHexUpper(strokeDraft.color), hexLower=hexUpper.toLowerCase();
@@ -1664,25 +1862,27 @@ function closeStrokeModal(commit){
  strokeModal.classList.remove('visible');
  if(altHeld)releaseAltEyedropper();else syncEyedropperUi();
  const b=bubble();
- if(!b){strokeDraft=null;strokeSnapshot=null;return}
+ if(!b){strokeDraft=null;strokeSnapshot=null;strokeBeforeStyle=null;return}
  const l=b.text_layer||(b.text_layer={});
  if(commit&&strokeDraft){
-  const stroke=normalizeStroke({...strokeDraft,enabled:true});
-  const gradient=normalizeGradient(l.gradient);
+  const stroke=cloneStroke({...strokeDraft,enabled:true});
+  const gradient=cloneGradient(l.gradient);
   const style={stroke,gradient};
   Object.assign(l,style);
+  saveLastFxStroke(stroke);
   if($('stroke'))$('stroke').checked=true;
   syncInspectorStrokeUi(stroke);
+  pushStyleHistory(strokeBeforeStyle,captureStyle(b),'การปรับ Stroke');
   queueEdit({style});run(flush);
   sidebar();applyLiveBubbleStyle();
  }else{
-  const restored=strokeSnapshot?normalizeStroke(strokeSnapshot):normalizeStroke(null);
+  const restored=strokeSnapshot?cloneStroke(strokeSnapshot):cloneStroke(null);
   l.stroke=restored;
   if($('stroke'))$('stroke').checked=!!restored.enabled;
   syncInspectorStrokeUi(restored);
   applyLiveBubbleStyle();
  }
- strokeDraft=null;strokeSnapshot=null;
+ strokeDraft=null;strokeSnapshot=null;strokeBeforeStyle=null;
 }
 
 strokeHeader.onpointerdown=e=>{
@@ -1890,6 +2090,8 @@ function cancelEyedropper(){
  eyedropMode='off';
  eyedropTarget=null;
  eyedropDrag=null;
+ strokeEyedropBefore=null;
+ strokeEyedropBase=null;
  syncEyedropperUi();
  if(wasActive&&!altHeld)info('');
 }
@@ -2331,12 +2533,17 @@ const commands={
  txtModal:['ส่งออก / นำเข้าคำแปล TXT',openTxtModal,'T'],
  saveJson:['บันทึกโปรเจกต์ JSON',()=>saveProjectJson(false),'Ctrl+S'],
  saveJsonAs:['บันทึกโปรเจกต์ JSON เป็นไฟล์ใหม่ (Save As)',()=>saveProjectJson(true),'Ctrl+Shift+S'],
- undoTransform:['Undo ย้อนการปรับตำแหน่ง/ขนาด/หมุน',performUndo,'Ctrl+Z'],
- redoTransform:['Redo ทำซ้ำการปรับตำแหน่ง/ขนาด/หมุน',performRedo,'Ctrl+Y'],
+ undoTransform:['Undo ย้อนการปรับตำแหน่ง/ขนาด/หมุน/fx',performUndo,'Ctrl+Z'],
+ redoTransform:['Redo ทำซ้ำการปรับตำแหน่ง/ขนาด/หมุน/fx',performRedo,'Ctrl+Y'],
  gemini:['Gemini แปลทั้งหน้า',()=>command('translate',true),''],
  polish:['เกลาสำนวนกรอบนี้',()=>command('translate'),''],
  fx:['ดูดสี Auto fx',()=>command('fx'),''],
- reset:['ล้าง fx',()=>command('edit',false,{style:{}}),''],
+ reset:['ล้าง fx',async()=>{
+  const b=bubble(),before=b?captureStyle(b):null;
+  const res=await command('edit',false,{style:{}});
+  if(res&&before&&bubble())pushStyleHistory(before,captureStyle(bubble()),'การล้าง fx');
+  return res;
+ },''],
  zoomIn:['ซูมเข้าตามปลายเมาส์ (Zoom In)',()=>scale(zoom*1.2),'Alt+Wheel ↑'],
  zoomOut:['ซูมออกตามปลายเมาส์ (Zoom Out)',()=>scale(zoom*.83),'Alt+Wheel ↓'],
  panHand:['แพน / เลื่อนภาพ (Hand Tool · ใช้ได้ทุกโหมด)',()=>info('กด Spacebar ค้าง + คลิกซ้ายค้างลากเพื่อแพนภาพได้ในทุกโหมด'),'Space+Drag'],
@@ -2598,6 +2805,10 @@ document.onkeydown=e=>{
  if(code==='Escape'){
   if(drawFrame){e.preventDefault();drawFrame=false;bars();draw();info('');return}
   if(maskEdit){e.preventDefault();run(()=>cancelMaskEdit());return}
+ }
+ if(mod&&!e.altKey&&!strokeModalOpen&&!gradModalOpen&&!isTypingField(e.target)&&!isTypingField(document.activeElement)){
+  if(code==='KeyZ'&&!e.shiftKey){e.preventDefault();run(maskEdit?undoMaskEdit:performUndo);return}
+  if(code==='KeyY'||(code==='KeyZ'&&e.shiftKey)){e.preventDefault();if(!maskEdit)run(performRedo);return}
  }
  if(editing)return;
  if(code==='Tab'&&!mod&&!e.altKey&&!e.shiftKey){
